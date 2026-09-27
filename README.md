@@ -85,9 +85,9 @@ flowchart TD
 | 自動認識 | 70.1%（4,075 / 5,814） | 67.9% |
 | 正解歌詞を指定 | 72.1%（4,193 / 5,814） | 70.1% |
 
-### 公開実装との比較
+### 他方式との比較
 
-同じ開発用 J-POP 9 曲の全曲を、歌詞付き譜面の計 5,814 音符と比較しました。[STARS](https://github.com/gwx314/STARS) の公開モデルには、分離したボーカルと soramimic-score が自動認識した発音列を渡しています。[Vocal2Midi](https://github.com/Xiantaidu/Vocal2Midi/tree/9c5826a407274c2e2dbacb79d41a4eee611f55de) には同じ分離ボーカルを渡し、付属の日本語歌唱認識、歌詞整列、音符抽出を使いました。[VocalParse](https://github.com/pymaster17/VocalParse/tree/e7b3946c940a9216a5314f9ba11a19fd70a6befb) には同じ分離ボーカルだけを渡しました。Vocal2Midi と VocalParse には soramimic-score の認識歌詞も正解歌詞も渡していません。
+同じ開発用 J-POP 9 曲の全曲を、歌詞付き譜面の計 5,814 音符と比較しました。[STARS](https://github.com/gwx314/STARS) の公開モデルには、分離したボーカルと soramimic-score が自動認識した発音列を渡しています。[Vocal2Midi](https://github.com/Xiantaidu/Vocal2Midi/tree/9c5826a407274c2e2dbacb79d41a4eee611f55de) には同じ分離ボーカルを渡し、付属の日本語歌唱認識、歌詞整列、音符抽出を使いました。[VocalParse](https://github.com/pymaster17/VocalParse/tree/e7b3946c940a9216a5314f9ba11a19fd70a6befb) には同じ分離ボーカルだけを渡しました。[Synthesizer V Studio 2 Pro](https://sv2.docs.dreamtonics.com/en/voice-to-midi) の Voice-to-MIDI にも同じ分離ボーカルを渡し、日本語の発音を自動認識させました。Vocal2Midi、VocalParse、Synthesizer V には soramimic-score の認識歌詞も正解歌詞も渡していません。
 
 | 方法 | 開始・音高 F1 | 開始・音高・モーラ F1 |
 | --- | ---: | ---: |
@@ -95,8 +95,11 @@ flowchart TD
 | STARS | 21.0% | 0.8% |
 | Vocal2Midi | 68.9% | 29.5% |
 | VocalParse | 1.8% | 0.0% |
+| Synthesizer V Studio 2 Pro | 55.5% | 38.0% |
 
-STARS、Vocal2Midi、VocalParse の音高は採点時に一律 12 半音上げています。STARS には 1 モーラを 1 単位として渡し、推定されたその区間と音符の重なりから読みを対応付けました。STARS は音素ごとの時刻も出力します。
+STARS、Vocal2Midi、VocalParse、Synthesizer V の音高は採点時に一律 12 半音上げています。STARS には 1 モーラを 1 単位として渡し、推定されたその区間と音符の重なりから読みを対応付けました。STARS は音素ごとの時刻も出力します。
+
+Synthesizer V は Studio 2 Pro 2.1.2 で、音符検出感度は初期値、音高の半音単位への丸めと発音の自動認識を有効にし、言語を日本語に設定しました。推定音符は 6,325 個です。音符に付いた「-」は直前の発音の継続、音素表記は最初の母音までをその音符の発音として比較しました。伴奏を含む音源からボーカルを取り出す処理は Synthesizer V の変換機能には含まれないため、他方式と同じ分離済みボーカルを使いました。[Dreamtonics も単独のボーカル録音を入力として推奨しています](https://www.dreamtonics.com/voice-to-midi/)。
 
 Vocal2Midi は日本語モーラ認識に RomajiASR v1.0.0、整列に HubertFA v0.0.7、音符抽出に GAME 1.0.3 medium を使用しました。音符に付いた「-」は直前のモーラの継続として採点し、正解譜面の「ー」だけが付いた音符にも対応できるようにしています。
 
