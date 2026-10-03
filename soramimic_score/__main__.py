@@ -54,6 +54,8 @@ def analyze_main(argv) -> int:
     parser.add_argument("--dictionary-readings", action="store_true", help="音声比較を省略し辞書の読みを使用")
     parser.add_argument("--demucs-checkpoint", type=Path, help="取得済みHTDemucsチェックポイント")
     parser.add_argument("--kana-model", default="sbintuitions/kana-whisper")
+    parser.add_argument("--romaji-model", type=Path,
+                        help="RomajiASR ONNXモデル。歌詞の欠損を推定カタカナで補う")
     parser.add_argument("--lyrics", type=Path, help="UTF-8歌詞ファイル（1行1フレーズ）")
     parser.add_argument("--adjust-lyrics", action="store_true",
                         help="音源の認識結果に合わせ、入力歌詞を行単位で削除・補完する")
@@ -72,7 +74,8 @@ def analyze_main(argv) -> int:
                              args.ctc_model, args.device, args.local_files_only,
                              separate_vocals=not args.no_vocal_separation,
                              acoustic_readings=not args.dictionary_readings,
-                             demucs_checkpoint=args.demucs_checkpoint, kana_model=args.kana_model)
+                             demucs_checkpoint=args.demucs_checkpoint, kana_model=args.kana_model,
+                             romaji_model=args.romaji_model)
         score = analyze_audio(args.audio, model_config=config, lyrics=lyrics,
                               adjust_lyrics=args.adjust_lyrics,
                               on_progress=lambda stage: print(stage, file=sys.stderr, flush=True))
