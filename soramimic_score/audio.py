@@ -119,6 +119,7 @@ class AudioAdapters:
     repetition_evidence_mix: RepetitionEvidence | None = None
     vocalization_reattacks: Callable[[str, float, float], Sequence[object]] | None = None
     automatic_reading_selector: ReadingSelector | None = None
+    phonetic_recognizer: Callable[[Path, Sequence[tuple[float, float]]], Sequence[object]] | None = None
 
 
 class AudioPipelineError(RuntimeError):
@@ -403,9 +404,13 @@ def analyze_audio(
         raise AudioPipelineError("lyrics", "ASR-first analysis requires a recognizer")
     if on_progress:
         on_progress("歌詞を認識しています")
-    raw_recognized = _validate_lines(
-        _run_adapter("lyrics", adapters.lyric_recognizer, path), timed=True,
-    )
+    def validate_recognized(current):
+        if not current and lyrics is None and adapters.phonetic_recognizer is not None:
+            return ()
+        return _validate_lines(current, timed=True)
+
+    raw_recognized = validate_recognized(tuple(
+        _run_adapter("lyrics", adapters.lyric_recognizer, path)))
     if on_progress:
         on_progress("音符と音高を推定しています")
     notes = _validate_notes(_run_adapter("melody", adapters.melody_transcriber, path))
@@ -505,7 +510,7 @@ def analyze_audio(
              "recovered_count": len(recovered)},
         ))
     recognized_lines.sort(key=lambda item: (item.start_sec, item.end_sec))
-    recognized = _validate_lines(recognized_lines, timed=True)
+    recognized = validate_recognized(recognized_lines)
     if lyrics is None and (adapters.repetition_evidence is not None
                            or adapters.repetition_evidence_mix is not None):
         def repeat_ctc(line: LyricLine) -> float:
@@ -726,7 +731,7 @@ def analyze_audio(
                 ))
         retained = tuple(item for index, line in enumerate(recognized)
                          for item in replacements.get(index, (line,)))
-        recognized = _validate_lines(retained, timed=True)
+        recognized = validate_recognized(retained)
     adjustment, overlay = None, None
     lines = recognized
     if lyrics is not None:
@@ -757,7 +762,7 @@ def analyze_audio(
         on_progress("歌詞の読みを確認しています")
     readings = _validate_readings(
         lines, _run_adapter("readings", reading_selector, path, lines),
-    )
+    ) if lines else ()
     if overlay is not None:
         for group, reading in zip(overlay["groups"], readings, strict=True):
             group["original_acoustic_reading"] = group["acoustic_reading"]
@@ -771,6 +776,8 @@ def analyze_audio(
         on_progress("モーラの時刻を推定しています")
 
     def align_retained(current_lines, current_readings):
+        if not current_lines:
+            return (), (), ()
         while True:
             try:
                 aligned = _validate_moras(current_readings, _run_adapter(
@@ -793,6 +800,8 @@ def analyze_audio(
                 current_lines = current_lines[:index] + current_lines[index + 1:]
                 current_readings = current_readings[:index] + current_readings[index + 1:]
                 if not current_lines:
+                    if adapters.phonetic_recognizer is not None:
+                        return (), (), ()
                     raise AudioPipelineError("lyrics", "no acoustically alignable lyric lines")
 
     lines, readings, moras = align_retained(lines, readings)
@@ -838,11 +847,11 @@ def analyze_audio(
                                     and not is_pathological_repeated_vocalization(candidate, notes)
                                     and readable(candidate.text)
                                     and has_melodic_support(candidate, notes))
-            lines = _validate_lines(sorted(retained, key=lambda item: item.start_sec), timed=True)
+            lines = validate_recognized(sorted(retained, key=lambda item: item.start_sec))
             readings = _validate_readings(
-                lines, _run_adapter("readings", reading_selector, path, lines))
+                lines, _run_adapter("readings", reading_selector, path, lines)) if lines else ()
             lines, readings, moras = align_retained(lines, readings)
-    if lyrics is None and adapters.lyric_recoverer is not None:
+    if lyrics is None and adapters.lyric_recoverer is not None and lines:
         # Stage 3 owns note assignment. Probe once before retrying truly unowned
         # note runs; a raw gap between Whisper lines is not sufficient evidence.
         provisional = compile_score(
@@ -999,6 +1008,20 @@ def analyze_audio(
                 readings = _validate_readings(lines, _run_adapter(
                     "readings", reading_selector, path, lines))
                 lines, readings, moras = align_retained(lines, readings)
+    if lyrics is None and adapters.phonetic_recognizer is not None:
+        from .phonetic_fallback import add_phonetic_fallback, uncovered_note_windows
+        windows = uncovered_note_windows(moras, notes)
+        if windows:
+            if on_progress:
+                on_progress("歌詞の欠損をカタカナの発音で補っています")
+            events = _run_adapter("phonetic recognition", adapters.phonetic_recognizer,
+                                  path, windows)
+            lines, readings, moras, fallback_evidence = add_phonetic_fallback(
+                lines, readings, moras, notes, events)
+            semantic_evidence.extend(fallback_evidence)
+            lines = _validate_lines(lines, timed=True)
+            readings = _validate_readings(lines, readings)
+            moras = _validate_moras(readings, moras)
     if on_progress:
         on_progress("楽譜データを組み立てています")
     observations = build_audio_observations(lines, readings, moras, notes)

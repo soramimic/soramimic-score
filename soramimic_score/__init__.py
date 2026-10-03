@@ -2,6 +2,7 @@
 
 from .alignment import ObservedSingingUnit, build_known_lyrics_document
 from .models import ModelConfig
+from .phonetic_fallback import PhoneticMora
 from .lyrics import LyricAdjustment, adjust_known_lyrics
 from .surface import SurfaceLine, align_lyric_surface, attach_lyric_surface, lyric_surface, plan_lyric_inputs
 from .audio import (
@@ -80,6 +81,7 @@ __all__ = [
     "ModelConfig",
     "Boundary",
     "AlignedMora",
+    "PhoneticMora",
     "AudioAdapters",
     "AudioPipelineError",
     "CorrespondenceAlternative",

@@ -57,8 +57,13 @@ class ModelConfig:
     kana_model: str = KANA_MODEL
     shared_inference_url: str | None = None
     shared_inference_priority: str = "dev"
+    romaji_model: Path | None = None
 
     def validate(self):
+        if self.romaji_model is not None:
+            for filename in ("model.onnx", "phoneme_vocab.json"):
+                if not (Path(self.romaji_model) / filename).is_file():
+                    raise ValueError(f"RomajiASR directory is missing {filename}")
         if self.device not in {"cpu", "cuda"}:
             raise ValueError("device must be cpu or cuda")
         for directory in (self.sheetsage_model, self.sheetsage_base):
@@ -428,6 +433,10 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
             stride=emission_cache["stride"], rate=emission_cache["rate"],
         )
 
+    def phonetic_recognizer(path, windows):
+        from .romaji import transcribe_romaji
+        return transcribe_romaji(vocals_path or path, windows, config.romaji_model)
+
     if config.acoustic_readings:
         automatic_selector = lambda path, lines: select_readings(path, lines, automatic=True)
     else:
@@ -436,4 +445,5 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
                          align, melody, recognize, lyric_reading, recover_window,
                          repeat_evidence, vocal_activity if vocals_path is not None else None,
                          repeat_evidence_mix if vocals_path is not None else None,
-                         vocalization_reattacks, automatic_selector)
+                         vocalization_reattacks, automatic_selector,
+                         phonetic_recognizer if config.romaji_model is not None else None)

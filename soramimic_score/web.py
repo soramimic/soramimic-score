@@ -140,6 +140,8 @@ def create_app(*, data_root: Path | None = None, analyzer=None, public: bool | N
                 local_files_only=os.environ.get("SORAMIMIC_SCORE_LOCAL_ONLY") == "1",
                 shared_inference_url=os.environ.get("SORAMIMIC_AUDIO_INFERENCE_URL"),
                 shared_inference_priority="public" if is_public else "dev",
+                romaji_model=Path(os.environ["SORAMIMIC_SCORE_ROMAJI_MODEL"])
+                    if os.environ.get("SORAMIMIC_SCORE_ROMAJI_MODEL") else None,
             )
             lyrics = tuple(line for line in (job_dir / "lyrics.txt").read_text(
                 encoding="utf-8").splitlines() if line.strip()) if supplied else None
