@@ -44,7 +44,8 @@ _SOFT_TEMPLATES = (
         r"(?:お願いします|お願いいたします|ありがとう(?:ございます|ございました))")),
 )
 _STOCK_MEDIA = re.compile(
-    r"(?:🐯?soundhodori사운드호돌이サウンドゥ?ホドリ|instagramtwitterホドリ)"
+    r"(?:(?:🐯\ufe0f?)?soundhodori사운드호돌이サウンドゥ?ホドリ"
+    r"|instagramtwitterホドリ)+"
 )
 MIN_CTC_MEDIAN_SCORE = 0.00075
 _tagger = None
@@ -64,7 +65,9 @@ def non_lyric_template_family(text: str) -> str | None:
         return None
     if is_credit_hallucination(text) or re.fullmatch(_LABEL, normalized):
         return "credits"
-    if _STOCK_MEDIA.fullmatch(normalized):
+    # Whisper may put the credit and repeated social links in one segment.
+    # Keep the whole-segment match: incidental lyric mentions are not credits.
+    if _STOCK_MEDIA.fullmatch(re.sub(r"\s+", "", normalized)):
         return "stock-media-credit"
     for family, pattern in _SOFT_TEMPLATES:
         if pattern.fullmatch(normalized):

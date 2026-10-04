@@ -156,6 +156,73 @@ class AudioPipelineTests(unittest.TestCase):
             self._readings, self._moras, self._melody, lambda _: lines[:3]))
         self.assertEqual(score.score.canonical_text, "空")
 
+    def test_stock_media_templates_match_single_and_combined_segments(self):
+        header = "🐯 Sound Hodori 사운드 호돌이 サウンドゥ ホドリ"
+        social = "Instagram & Twitter ホドリ"
+        for text in (header, header.replace("ゥ", ""), social,
+                     "\n".join((header, social, social, social)),
+                     " ".join((social, social, social)),
+                     social * 3, header.replace("🐯", "🐯\ufe0f"),
+                     "Ｉｎｓｔａｇｒａｍ ＆ Ｔｗｉｔｔｅｒ ホドリ"):
+            with self.subTest(text=text):
+                self.assertEqual(non_lyric_template_family(text), "stock-media-credit")
+        for text in ("Instagram & Twitter", "ホドリ", "ラララ " * 3,
+                     social + "で君と出会った", "君へ歌う\n" + social,
+                     "Sound Hodori の歌を聴く"):
+            with self.subTest(text=text):
+                self.assertIsNone(non_lyric_template_family(text))
+
+    def test_combined_stock_media_segment_is_retried_before_alignment(self):
+        header = "🐯 Sound Hodori 사운드 호돌이 サウンドゥ ホドリ"
+        social = "Instagram & Twitter ホドリ"
+        hallucination = "\n".join((header, social, social, social))
+        retries = []
+        aligned = []
+
+        def retry(_path, start, end):
+            retries.append((start, end))
+            return (LyricLine(social * 3, start, start + .4),
+                    LyricLine("空", start + .4, end))
+
+        def align(_path, lines, readings):
+            aligned.extend(line.text for line in lines)
+            return tuple(AlignedMora(index, offset, kana,
+                                     line.start_sec + offset * .1,
+                                     line.start_sec + (offset + 1) * .1, .8)
+                         for index, (line, reading) in enumerate(zip(lines, readings))
+                         for offset, kana in enumerate(reading.kana))
+
+        score = analyze_audio(self.audio, AudioAdapters(
+            self._readings, align,
+            lambda _: (MelodyNote(0, 2, 60), MelodyNote(2.2, 2.6, 62)),
+            lambda _: (LyricLine(hallucination, 0, 2), LyricLine("耳", 2.2, 2.6)),
+            lyric_recoverer=retry))
+        self.assertEqual(retries, [(0, 2)])
+        self.assertEqual(aligned, ["空", "耳"])
+        self.assertEqual(score.score.canonical_text, "空\n耳")
+        gate = next(item for item in score.observations.evidence
+                    if item.kind == "lyric-semantic-gate")
+        self.assertEqual(gate.detail["template_family"], "stock-media-credit")
+        self.assertEqual(gate.detail["status"], "recovered")
+        self.assertEqual(gate.detail["recovered_count"], 1)
+
+    def test_stock_media_repeats_are_excluded_without_a_recovery_adapter(self):
+        social = "Instagram & Twitter ホドリ"
+        segments = ((LyricLine(social * 3, 0, .6),),
+                    tuple(LyricLine(social, i * .2, (i + 1) * .2)
+                          for i in range(3)))
+        for lines in segments:
+            with self.subTest(lines=lines):
+                score = analyze_audio(self.audio, AudioAdapters(
+                    self._readings, self._moras, self._melody,
+                    lambda _: (*lines, LyricLine("空", .6, 1))))
+                self.assertEqual(score.score.canonical_text, "空")
+                gates = [item for item in score.observations.evidence
+                         if item.kind == "lyric-semantic-gate"]
+                self.assertEqual(len(gates), len(lines))
+                self.assertTrue(all(item.detail["status"] == "rejected"
+                                    for item in gates))
+
     @unittest.skipUnless(importlib.util.find_spec("MeCab") and
                          importlib.util.find_spec("unidic_lite"), "Japanese entity tagger unavailable")
     def test_japanese_creator_name_is_a_contextual_credit(self):
