@@ -168,6 +168,31 @@ class PhoneticRepetitionTests(unittest.TestCase):
         self.assertEqual([r.kana for r in document.observations.readings],
                          ['アオイソラ'] * 3)
 
+    def test_repetition_scan_does_not_change_existing_gap_recognition(self):
+        calls = []
+        notes = self.notes + (MelodyNote(4., 5., 60), MelodyNote(5., 6., 62))
+
+        def gaps(_path, windows):
+            calls.append(tuple(windows))
+            return tuple(PhoneticMora(kana, 4.3 + i * .3, 4.4 + i * .3)
+                         for i, kana in enumerate('カキク'))
+
+        adapters = AudioAdapters(
+            lambda _p, _l: (self.reading,),
+            lambda _p, _l, _r: tuple(AlignedMora(0, i, k, i * .8, (i + 1) * .8, .9)
+                                     for i, k in enumerate('アオイソラ')),
+            lambda _: notes, lambda _: (self.line,), phonetic_recognizer=gaps,
+            phonetic_repetition_recognizer=lambda _p, _w: self.events[:5] + tuple(
+                PhoneticMora(kana, 4.3 + i * .3, 4.4 + i * .3)
+                for i, kana in enumerate('セカイ')),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'input.wav'
+            path.write_bytes(b'adapter fixture')
+            document = analyze_audio(path, adapters)
+        self.assertEqual(calls, [((4., 6.),)])
+        self.assertEqual(document.score.canonical_text, '青い空\nカキク')
+
 
 class PhoneticContextTests(unittest.TestCase):
     def test_overlapping_requests_share_one_decode_per_owned_interval(self):

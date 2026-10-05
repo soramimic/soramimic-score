@@ -437,6 +437,11 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
         from .romaji import transcribe_romaji
         return transcribe_romaji(vocals_path or path, windows, config.romaji_model)
 
+    def phonetic_repetition_recognizer(path, windows):
+        from .romaji import transcribe_romaji
+        return transcribe_romaji(vocals_path or path, windows, config.romaji_model,
+                                 fixed_grid=True)
+
     if config.acoustic_readings:
         automatic_selector = lambda path, lines: select_readings(path, lines, automatic=True)
     else:
@@ -446,4 +451,5 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
                          repeat_evidence, vocal_activity if vocals_path is not None else None,
                          repeat_evidence_mix if vocals_path is not None else None,
                          vocalization_reattacks, automatic_selector,
-                         phonetic_recognizer if config.romaji_model is not None else None)
+                         phonetic_recognizer if config.romaji_model is not None else None,
+                         phonetic_repetition_recognizer if config.romaji_model is not None else None)

@@ -66,7 +66,7 @@ def decode_romaji_ids(ids, reverse, blank, origin, duration):
     return tuple(result)
 
 
-def transcribe_romaji(path: Path, windows, model_dir: Path):
+def transcribe_romaji(path: Path, windows, model_dir: Path, *, fixed_grid=False):
     import librosa
     import numpy as np
     import onnxruntime as ort
@@ -94,11 +94,26 @@ def transcribe_romaji(path: Path, windows, model_dir: Path):
     context = min(20., fixed / rate) if fixed else 20.
     duration = len(audio) / rate
     windows = tuple(windows)
-    chunks = context_windows(windows, duration, context)
+    if fixed_grid:
+        chunks = [(int(lo * rate), min(len(audio), int(hi * rate)), start, end)
+                  for lo, hi, start, end in context_windows(windows, duration, context)]
+    else:
+        # Preserve the original gap decoder's context. Repetition scanning
+        # must not alter pronunciations in unrelated, already recovered gaps.
+        chunks = []
+        for start, end in windows:
+            if not 0 <= start < end <= duration + .05:
+                raise ValueError("RomajiASR window is outside the audio")
+            parts = ([(a / rate, min(end, a / rate + context))
+                      for a in range(int(start * rate), int(end * rate), int(context * rate))]
+                     if end - start > context else [(start, end)])
+            for a, b in parts:
+                first = int(max(0., min((a + b - context) / 2,
+                                       max(0., duration - context))) * rate)
+                chunks.append((first, min(len(audio), first + int(context * rate)), a, b))
     decoded = {}
     events = []
-    for lo, hi, start, end in chunks:
-        first, last = int(lo * rate), min(len(audio), int(hi * rate))
+    for first, last, start, end in chunks:
         key = first, last
         if key not in decoded:
             count = fixed or last - first

@@ -120,6 +120,7 @@ class AudioAdapters:
     vocalization_reattacks: Callable[[str, float, float], Sequence[object]] | None = None
     automatic_reading_selector: ReadingSelector | None = None
     phonetic_recognizer: Callable[[Path, Sequence[tuple[float, float]]], Sequence[object]] | None = None
+    phonetic_repetition_recognizer: Callable[[Path, Sequence[tuple[float, float]]], Sequence[object]] | None = None
 
 
 class AudioPipelineError(RuntimeError):
@@ -1011,12 +1012,12 @@ def analyze_audio(
     if lyrics is None and adapters.phonetic_recognizer is not None:
         from .phonetic_fallback import add_phonetic_fallback, uncovered_note_windows
         from .phonetic_repeats import find_repeated_lines, repetition_windows
-        windows = tuple(sorted(set((*uncovered_note_windows(moras, notes),
-                                    *repetition_windows(lines, readings)))))
+        windows = repetition_windows(lines, readings)
         if windows:
             if on_progress:
                 on_progress("独立した発音認識で反復と歌詞の欠損を確認しています")
-            events = tuple(_run_adapter("phonetic recognition", adapters.phonetic_recognizer,
+            recognizer = adapters.phonetic_repetition_recognizer or adapters.phonetic_recognizer
+            events = tuple(_run_adapter("phonetic repetition recognition", recognizer,
                                         path, windows))
             replacements = {}
             for proposal in find_repeated_lines(lines, readings, notes, events):
@@ -1073,6 +1074,10 @@ def analyze_audio(
                     updated_readings.extend(selected)
                 lines, readings, moras = (tuple(updated_lines), tuple(updated_readings),
                                           tuple(updated_moras))
+        windows = uncovered_note_windows(moras, notes)
+        if windows:
+            events = _run_adapter("phonetic recognition", adapters.phonetic_recognizer,
+                                  path, windows)
             lines, readings, moras, fallback_evidence = add_phonetic_fallback(
                 lines, readings, moras, notes, events)
             semantic_evidence.extend(fallback_evidence)
