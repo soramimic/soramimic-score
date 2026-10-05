@@ -159,6 +159,7 @@ class _Unit:
     segment_id: str | None
     ctc_onset_sec: float | None
     must_assign: bool
+    independent_phase: bool = False
 
     @property
     def is_special(self) -> bool:
@@ -253,6 +254,9 @@ def _units(
                         if segment_ids_by_mora is not None else set())
             if len(segments) > 1:
                 raise ValueError("one singing unit cannot cross lyric segments")
+            phases = [evidence[identifier] for identifier in unit.evidence_ids
+                      if identifier in evidence and evidence[identifier].detail.get(
+                          "timing_method") == "acoustic-repetition-phase"]
             converted.append(_Unit(
                 unit, atom_moras, text, base_index, utterance.id,
                 next(iter(segments)) if segments else None, onset,
@@ -260,7 +264,9 @@ def _units(
                     evidence.get(identifier) is not None
                     and evidence[identifier].kind == "repeated-vocalization-reattack"
                     for identifier in unit.evidence_ids
-                ),
+                ) or (bool(phases) and not all(char in SPECIAL_MORAS for char in text)
+                      and any(item.detail.get("pitched_note_support") is True for item in phases)),
+                bool(phases),
             ))
         result.append((utterance.id, tuple(converted)))
     return tuple(result)
@@ -423,7 +429,9 @@ def _optimize_phrase(
                    if state[0] == unit_index]
         for (unused_unit, cursor, previous_index, previous_segment), path in current:
             unit = units[unused_unit]
-            if not unit.must_assign:
+            supported_phase = (unit.ctc_onset_sec is not None and any(
+                note.start_sec - .12 <= unit.ctc_onset_sec <= note.end_sec + .12 for note in notes))
+            if not unit.must_assign or unit.independent_phase and not supported_phase:
                 omitted_cost = NoteRunCost(
                     mora_omission=config.mora_omission_weight * len(unit.mora_ids)
                 )
@@ -450,6 +458,9 @@ def _optimize_phrase(
                         starts.insert(0, previous_index)
                 for start_note in starts:
                     split = start_note < cursor
+                    if (group[0].independent_phase and not notes[start_note].start_sec - .12
+                            <= float(group[0].ctc_onset_sec) <= notes[start_note].end_sec + .12):
+                        continue
                     skipped_notes = () if split else notes[cursor:start_note]
                     if any(note.id in required_note_ids for note in skipped_notes):
                         continue
@@ -615,7 +626,8 @@ def optimize_note_runs(
             previous_end = end_sec
     anchors = []
     for phrase_index, (utterance_id, units) in enumerate(phrases):
-        times = [unit.ctc_onset_sec for unit in units if unit.ctc_onset_sec is not None]
+        times = [unit.ctc_onset_sec for unit in units if unit.ctc_onset_sec is not None
+                 and not (unit.independent_phase and unit.is_special)]
         if times:
             anchors.append((phrase_index, utterance_id, min(times), max(times)))
     if any(left[2] > right[2] or left[3] > right[3]

@@ -442,6 +442,25 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
         return transcribe_romaji(vocals_path or path, windows, config.romaji_model,
                                  fixed_grid=True)
 
+    def acoustic_repetition_recognizer(path, events, notes):
+        from .acoustic_repeats import find_acoustic_repetitions
+        return find_acoustic_repetitions(vocals_path or path, events, notes)
+
+    def melody_recoverer(path, start, end):
+        import librosa
+        import soundfile as sf
+        duration = librosa.get_duration(path=str(path))
+        first, last = max(0., start - 3.), min(duration, end + 3.)
+        samples, rate = librosa.load(str(path), sr=None, mono=True,
+                                    offset=first, duration=last - first)
+        if not len(samples):
+            return ()
+        with tempfile.TemporaryDirectory(prefix="soramimic-score-repeat-melody-") as directory:
+            excerpt = Path(directory) / "window.wav"
+            sf.write(excerpt, samples, rate)
+            return tuple(replace(n, start_sec=n.start_sec + first, end_sec=n.end_sec + first,
+                                 source=n.source + "/local-repeat") for n in melody(excerpt))
+
     if config.acoustic_readings:
         automatic_selector = lambda path, lines: select_readings(path, lines, automatic=True)
     else:
@@ -452,4 +471,8 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
                          repeat_evidence_mix if vocals_path is not None else None,
                          vocalization_reattacks, automatic_selector,
                          phonetic_recognizer if config.romaji_model is not None else None,
-                         phonetic_repetition_recognizer if config.romaji_model is not None else None)
+                         phonetic_repetition_recognizer if config.romaji_model is not None else None,
+                         acoustic_repetition_recognizer
+                         if config.romaji_model is not None and vocals_path is not None else None,
+                         melody_recoverer
+                         if config.romaji_model is not None and vocals_path is not None else None)
