@@ -121,6 +121,8 @@ class AudioAdapters:
     automatic_reading_selector: ReadingSelector | None = None
     phonetic_recognizer: Callable[[Path, Sequence[tuple[float, float]]], Sequence[object]] | None = None
     phonetic_repetition_recognizer: Callable[[Path, Sequence[tuple[float, float]]], Sequence[object]] | None = None
+    acoustic_repetition_recognizer: Callable[[Path, Sequence[object], Sequence[MelodyNote]], Sequence[object]] | None = None
+    melody_recoverer: Callable[[Path, float, float], Sequence[MelodyNote]] | None = None
 
 
 class AudioPipelineError(RuntimeError):
@@ -296,6 +298,12 @@ def build_audio_observations(
     for item in aligned_moras:
         evidence_id = f"audio-mora-{item.line_index}-{item.mora_index}"
         center = (item.start_sec + item.end_sec) / 2
+        independent_phase = item.source == "acoustic-repetition-phase"
+        timing_detail = ({
+            "timing_method": "acoustic-repetition-phase", "confidence_available": False,
+            "pitched_note_support": any(n.start_sec - .12 <= center <= n.end_sec + .12
+                                        for n in melody_notes),
+        } if independent_phase else {})
         evidence.append(Evidence(
             evidence_id,
             item.source,
@@ -305,7 +313,8 @@ def build_audio_observations(
                 "time_sec": center,
                 "start_sec": item.start_sec,
                 "end_sec": item.end_sec,
-                "conditioned_on_text": True,
+                "conditioned_on_text": not independent_phase,
+                **timing_detail,
             },
         ))
         observations.append(ObservedSingingUnit(
@@ -1013,6 +1022,9 @@ def analyze_audio(
         from .phonetic_fallback import add_phonetic_fallback, uncovered_note_windows
         from .phonetic_repeats import find_repeated_lines, repetition_windows
         windows = repetition_windows(lines, readings)
+        if adapters.acoustic_repetition_recognizer is not None:
+            last = max((item.end_sec for item in (*lines, *notes)), default=0.)
+            windows = ((0., last),) if last > 0 else ()
         if windows:
             if on_progress:
                 on_progress("独立した発音認識で反復と歌詞の欠損を確認しています")
@@ -1080,6 +1092,72 @@ def analyze_audio(
                     updated_readings.extend(selected)
                 lines, readings, moras = (tuple(updated_lines), tuple(updated_readings),
                                           tuple(updated_moras))
+            if adapters.acoustic_repetition_recognizer is not None:
+                from .repetition_repair import (
+                    has_foreign_transcript, merge_recovered_notes, missing_note_windows,
+                    needs_pronunciation_repair, phase_aligned_moras, replace_pronunciation_spans)
+                groups = _run_adapter("acoustic repetition recognition",
+                                      adapters.acoustic_repetition_recognizer, path, events, notes)
+                acoustic_replacements = []
+                confirmed = []
+                for group_index, group in enumerate(groups):
+                    if not has_foreign_transcript(group, lines):
+                        continue
+                    copies = tuple(LyricLine(group.kana, copy.start_sec, copy.end_sec)
+                                   for copy in group.occurrences
+                                   if needs_pronunciation_repair(group.kana, copy, moras))
+                    if not copies:
+                        continue
+                    selection = ReadingSelection(
+                        group.kana, "acoustic-phonetic-repetition", 0., (group.kana,),
+                        {"lyric_kind": "phonetic-fallback", "confidence_available": False})
+                    selected = (selection,) * len(copies)
+                    try:
+                        aligned = _validate_moras(selected, phase_aligned_moras(group, copies)
+                                                  if group.mora_offsets_sec else _run_adapter(
+                                                      "mora alignment", adapters.mora_aligner,
+                                                      path, copies, selected))
+                    except Exception:
+                        continue
+                    acoustic_replacements.extend(
+                        (copy, selection, tuple(replace(m, line_index=0) for m in aligned
+                                                if m.line_index == i)) for i, copy in enumerate(copies))
+                    confirmed.extend(copies)
+                    semantic_evidence.append(Evidence(
+                        f"audio-acoustic-repeat-{group_index}", "soramimic_score.acoustic_repeats",
+                        "lyric-acoustic-repetition", 0.,
+                        {"reading": group.kana, "confidence_available": False,
+                         "semantic_lyrics_available": False, "period_sec": group.period_sec,
+                         "template_start_sec": group.template_start_sec,
+                         "seed_start_sec": group.seed_start_sec,
+                         "mora_offsets_sec": list(group.mora_offsets_sec),
+                         "observed_count": len(group.occurrences), "repaired_count": len(copies),
+                         "occurrences": [{"start_sec": c.start_sec, "end_sec": c.end_sec,
+                                          "spectral_similarity": c.similarity,
+                                          "observed_kana": c.observed_kana} for c in group.occurrences]},
+                    ))
+                if acoustic_replacements:
+                    lines, readings, moras = replace_pronunciation_spans(
+                        lines, readings, moras, acoustic_replacements)
+                    lines = _validate_lines(lines, timed=True)
+                    readings = _validate_readings(lines, readings)
+                    moras = _validate_moras(readings, moras)
+                    if adapters.melody_recoverer is not None:
+                        for index, (start, end) in enumerate(missing_note_windows(confirmed, notes)):
+                            recovered = tuple(_run_adapter("repeated melody recovery",
+                                                           adapters.melody_recoverer, path, start, end))
+                            if not recovered:
+                                continue
+                            recovered = _validate_notes(recovered)
+                            previous_count = len(notes)
+                            notes = _validate_notes(merge_recovered_notes(notes, recovered, start, end))
+                            semantic_evidence.append(Evidence(
+                                f"audio-repeated-melody-{index}", "soramimic_score.models",
+                                "melody-local-retry", 0.,
+                                {"start_sec": start, "end_sec": end,
+                                 "added_note_count": len(notes) - previous_count,
+                                 "confidence_available": False},
+                            ))
         windows = uncovered_note_windows(moras, notes)
         if windows:
             events = _run_adapter("phonetic recognition", adapters.phonetic_recognizer,
