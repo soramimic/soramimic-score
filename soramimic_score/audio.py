@@ -120,6 +120,7 @@ class AudioAdapters:
     vocalization_reattacks: Callable[[str, float, float], Sequence[object]] | None = None
     automatic_reading_selector: ReadingSelector | None = None
     phonetic_recognizer: Callable[[Path, Sequence[tuple[float, float]]], Sequence[object]] | None = None
+    phonetic_repetition_recognizer: Callable[[Path, Sequence[tuple[float, float]]], Sequence[object]] | None = None
 
 
 class AudioPipelineError(RuntimeError):
@@ -1010,10 +1011,77 @@ def analyze_audio(
                 lines, readings, moras = align_retained(lines, readings)
     if lyrics is None and adapters.phonetic_recognizer is not None:
         from .phonetic_fallback import add_phonetic_fallback, uncovered_note_windows
-        windows = uncovered_note_windows(moras, notes)
+        from .phonetic_repeats import find_repeated_lines, repetition_windows
+        windows = repetition_windows(lines, readings)
         if windows:
             if on_progress:
-                on_progress("歌詞の欠損をカタカナの発音で補っています")
+                on_progress("独立した発音認識で反復と歌詞の欠損を確認しています")
+            recognizer = adapters.phonetic_repetition_recognizer or adapters.phonetic_recognizer
+            events = tuple(_run_adapter("phonetic repetition recognition", recognizer,
+                                        path, windows))
+            replacements = {}
+            for proposal in find_repeated_lines(lines, readings, notes, events):
+                index = proposal.line_index
+                original = lines[index]
+                found = proposal.occurrences
+                # Each copy gets its own acoustic interval. Never force the
+                # repeated target through the original, stretched alignment.
+                boundaries = (original.start_sec,
+                              *((a.end_sec + b.start_sec) / 2
+                                for a, b in zip(found, found[1:])),
+                              original.end_sec)
+                # The phonetic recognizer may recover only some occurrences.
+                # Keep unmatched audio available to gap recovery instead of
+                # stretching the nearest copy across that unrecognized span.
+                copies = tuple(replace(
+                    original, text=proposal.text,
+                    start_sec=max(a, occurrence.start_sec - .25),
+                    end_sec=min(b, occurrence.end_sec + .25),
+                ) for a, b, occurrence in zip(boundaries, boundaries[1:], found))
+                unit_reading = readings[index]
+                if proposal.original_count > 1:
+                    unit_reading = replace(
+                        unit_reading, kana=proposal.kana, candidates=(proposal.kana,),
+                        detail={"reason": "recognized-phrase-repetition",
+                                "original_reading": readings[index].kana,
+                                "original_count": proposal.original_count},
+                    )
+                selected = tuple(unit_reading for _ in copies)
+                try:
+                    aligned = _validate_moras(selected, _run_adapter(
+                        "mora alignment", adapters.mora_aligner, path, copies, selected))
+                except Exception:
+                    continue
+                replacements[index] = (copies, selected, aligned)
+                semantic_evidence.append(Evidence(
+                    f"audio-phonetic-repeat-{index}", "soramimic_score.phonetic_repeats",
+                    "lyric-phonetic-repetition", 0.,
+                    {"source_line_index": index, "surface": original.text,
+                     "reading": readings[index].kana,
+                     "original_count": proposal.original_count,
+                     "recovered_count": len(copies), "confidence_available": False,
+                     "phonetic_source": sorted({event.source for event in events}),
+                     "occurrences": [
+                         {"start_sec": item.start_sec, "end_sec": item.end_sec,
+                          "distance": item.distance, "exact_moras": item.exact_moras,
+                          "observed_kana": item.observed_kana,
+                          "note_support": item.note_support} for item in found]},
+                ))
+            if replacements:
+                updated_lines, updated_readings, updated_moras = [], [], []
+                for index, (line, reading) in enumerate(zip(lines, readings, strict=True)):
+                    copies, selected, aligned = replacements.get(index, (
+                        (line,), (reading,),
+                        tuple(replace(mora, line_index=0) for mora in moras
+                              if mora.line_index == index)))
+                    updated_moras.extend(replace(mora, line_index=mora.line_index
+                                                + len(updated_lines)) for mora in aligned)
+                    updated_lines.extend(copies)
+                    updated_readings.extend(selected)
+                lines, readings, moras = (tuple(updated_lines), tuple(updated_readings),
+                                          tuple(updated_moras))
+        windows = uncovered_note_windows(moras, notes)
+        if windows:
             events = _run_adapter("phonetic recognition", adapters.phonetic_recognizer,
                                   path, windows)
             lines, readings, moras, fallback_evidence = add_phonetic_fallback(

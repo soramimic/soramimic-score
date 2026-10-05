@@ -2,9 +2,36 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 from .phonetic_fallback import PhoneticMora, romaji_to_kana
+
+
+def context_windows(windows, duration, context):
+    """Assign each requested time to one decode with context on both sides.
+
+    Overlapping requests must not expose multiple, conflicting CTC decodes of
+    the same sound. The fixed grid also keeps results independent of request
+    ordering and of how callers divide adjacent lyric lines.
+    """
+    if not math.isfinite(duration + context) or duration <= 0 or context <= 0:
+        raise ValueError("RomajiASR needs positive duration and context")
+    windows = tuple(windows)
+    for start, end in windows:
+        if (not math.isfinite(start + end)
+                or not 0 <= start < end <= duration + .05):
+            raise ValueError("RomajiASR window is outside the audio")
+    hop = context / 2
+    cells = sorted({index for start, end in windows
+                    for index in range(math.floor(start / hop),
+                                       math.ceil(min(end, duration) / hop))})
+    result = []
+    for index in cells:
+        start, end = index * hop, min(duration, (index + 1) * hop)
+        first = max(0., min((start + end - context) / 2, max(0., duration - context)))
+        result.append((first, min(duration, first + context), start, end))
+    return tuple(result)
 
 
 def decode_romaji_ids(ids, reverse, blank, origin, duration):
@@ -39,7 +66,7 @@ def decode_romaji_ids(ids, reverse, blank, origin, duration):
     return tuple(result)
 
 
-def transcribe_romaji(path: Path, windows, model_dir: Path):
+def transcribe_romaji(path: Path, windows, model_dir: Path, *, fixed_grid=False):
     import librosa
     import numpy as np
     import onnxruntime as ort
@@ -66,35 +93,43 @@ def transcribe_romaji(path: Path, windows, model_dir: Path):
     fixed = shape[1] if isinstance(shape[1], int) else None
     context = min(20., fixed / rate) if fixed else 20.
     duration = len(audio) / rate
+    windows = tuple(windows)
+    if fixed_grid:
+        chunks = [(int(lo * rate), min(len(audio), int(hi * rate)), start, end)
+                  for lo, hi, start, end in context_windows(windows, duration, context)]
+    else:
+        # Preserve the original gap decoder's context. Repetition scanning
+        # must not alter pronunciations in unrelated, already recovered gaps.
+        chunks = []
+        for start, end in windows:
+            if not 0 <= start < end <= duration + .05:
+                raise ValueError("RomajiASR window is outside the audio")
+            parts = ([(a / rate, min(end, a / rate + context))
+                      for a in range(int(start * rate), int(end * rate), int(context * rate))]
+                     if end - start > context else [(start, end)])
+            for a, b in parts:
+                first = int(max(0., min((a + b - context) / 2,
+                                       max(0., duration - context))) * rate)
+                chunks.append((first, min(len(audio), first + int(context * rate)), a, b))
     decoded = {}
     events = []
-    for start, end in windows:
-        if not 0 <= start < end <= duration + .05:
-            raise ValueError("RomajiASR window is outside the audio")
-        if end - start > context:
-            chunks = [(a / rate, min(end, a / rate + context))
-                      for a in range(int(start * rate), int(end * rate), int(context * rate))]
-        else:
-            chunks = [(start, end)]
-        for a, b in chunks:
-            first = int(max(0., min((a + b - context) / 2,
-                                   max(0., duration - context))) * rate)
-            last = min(len(audio), first + int(context * rate))
-            key = first, last
-            if key not in decoded:
-                count = fixed or last - first
-                values = np.zeros((batch, count), dtype=np.float32)
-                values[:, :last - first] = audio[first:last]
-                dtype = np.float16 if inputs["input_values"].type == "tensor(float16)" else np.float32
-                feeds = {"input_values": values.astype(dtype)}
-                if "attention_mask" in inputs:
-                    mask = np.zeros((batch, count), dtype=np.int64)
-                    mask[:, :last - first] = 1
-                    feeds["attention_mask"] = mask
-                output = session.run(None, feeds)[0][0]
-                ids = output if output.ndim == 1 else output.argmax(axis=-1)
-                # HuBERT's 20 ms output stride; padded frames are never exposed.
-                decoded[key] = decode_romaji_ids(ids, reverse, blank, first / rate,
-                                                 (last - first) / rate)
-            events.extend(e for e in decoded[key] if a <= e.start_sec < b)
+    for first, last, start, end in chunks:
+        key = first, last
+        if key not in decoded:
+            count = fixed or last - first
+            values = np.zeros((batch, count), dtype=np.float32)
+            values[:, :last - first] = audio[first:last]
+            dtype = np.float16 if inputs["input_values"].type == "tensor(float16)" else np.float32
+            feeds = {"input_values": values.astype(dtype)}
+            if "attention_mask" in inputs:
+                mask = np.zeros((batch, count), dtype=np.int64)
+                mask[:, :last - first] = 1
+                feeds["attention_mask"] = mask
+            output = session.run(None, feeds)[0][0]
+            ids = output if output.ndim == 1 else output.argmax(axis=-1)
+            # HuBERT's 20 ms output stride; padded frames are never exposed.
+            decoded[key] = decode_romaji_ids(ids, reverse, blank, first / rate,
+                                             (last - first) / rate)
+        events.extend(e for e in decoded[key] if start <= e.start_sec < end
+                      and any(a <= e.start_sec < b for a, b in windows))
     return tuple(sorted(set(events), key=lambda e: (e.start_sec, e.end_sec)))

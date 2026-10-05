@@ -55,7 +55,7 @@ def analyze_main(argv) -> int:
     parser.add_argument("--demucs-checkpoint", type=Path, help="取得済みHTDemucsチェックポイント")
     parser.add_argument("--kana-model", default="sbintuitions/kana-whisper")
     parser.add_argument("--romaji-model", type=Path,
-                        help="RomajiASR ONNXモデル。歌詞の欠損を推定カタカナで補う")
+                        help="RomajiASR ONNXモデル。歌詞の反復と欠損を発音認識で補う")
     parser.add_argument("--lyrics", type=Path, help="UTF-8歌詞ファイル（1行1フレーズ）")
     parser.add_argument("--adjust-lyrics", action="store_true",
                         help="音源の認識結果に合わせ、入力歌詞を行単位で削除・補完する")
