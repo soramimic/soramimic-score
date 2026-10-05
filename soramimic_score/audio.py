@@ -1095,11 +1095,12 @@ def analyze_audio(
             if adapters.acoustic_repetition_recognizer is not None:
                 from .repetition_repair import (
                     copies_needing_repair, has_foreign_transcript, merge_recovered_notes,
-                    missing_note_windows, phase_aligned_moras, replace_pronunciation_spans)
+                    missing_note_windows, phase_aligned_moras, preserve_neighbor_readings,
+                    replace_pronunciation_spans)
                 groups = _run_adapter("acoustic repetition recognition",
                                       adapters.acoustic_repetition_recognizer, path, events, notes)
                 acoustic_replacements = []
-                confirmed = []
+                proposed_groups = []
                 for group_index, group in enumerate(groups):
                     if not has_foreign_transcript(group, lines):
                         continue
@@ -1121,7 +1122,18 @@ def analyze_audio(
                     acoustic_replacements.extend(
                         (copy, selection, tuple(replace(m, line_index=0) for m in aligned
                                                 if m.line_index == i)) for i, copy in enumerate(copies))
-                    confirmed.extend(copies)
+                    proposed_groups.append((group_index, group, copies))
+                if acoustic_replacements:
+                    def realign_neighbor(line, reading):
+                        return _run_adapter("repetition neighbor alignment", adapters.mora_aligner,
+                                            path, (line,), (reading,))
+                    lines, moras, acoustic_replacements = preserve_neighbor_readings(
+                        lines, readings, moras, acoustic_replacements, realign_neighbor)
+                confirmed = tuple(line for line, _, _ in acoustic_replacements)
+                for group_index, group, copies in proposed_groups:
+                    applied = tuple(copy for copy in copies if copy in confirmed)
+                    if not applied:
+                        continue
                     semantic_evidence.append(Evidence(
                         f"audio-acoustic-repeat-{group_index}", "soramimic_score.acoustic_repeats",
                         "lyric-acoustic-repetition", 0.,
@@ -1130,7 +1142,8 @@ def analyze_audio(
                          "template_start_sec": group.template_start_sec,
                          "seed_start_sec": group.seed_start_sec,
                          "mora_offsets_sec": list(group.mora_offsets_sec),
-                         "observed_count": len(group.occurrences), "repaired_count": len(copies),
+                         "observed_count": len(group.occurrences), "repaired_count": len(applied),
+                         "applied_windows_sec": [[copy.start_sec, copy.end_sec] for copy in applied],
                          "occurrences": [{"start_sec": c.start_sec, "end_sec": c.end_sec,
                                           "spectral_similarity": c.similarity,
                                           "observed_kana": c.observed_kana} for c in group.occurrences]},
