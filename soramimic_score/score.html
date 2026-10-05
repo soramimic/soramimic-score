@@ -266,8 +266,8 @@ player.addEventListener('ended',()=>{
 function draw(){
   if(!data)return;const t=player.currentTime||0,w=canvas.width,h=canvas.height;
   ctx.fillStyle='#10172d';ctx.fillRect(0,0,w,h);
-  const visible=data.notes.filter(n=>n.end>=t-5&&n.start<=t+5&&Number.isFinite(n.pitch));
-  const nearby=visible.length?visible:data.notes.filter(n=>Number.isFinite(n.pitch));
+  const visible=data.notes.filter(n=>!n.spoken&&n.end>=t-5&&n.start<=t+5&&Number.isFinite(n.pitch));
+  const nearby=visible.length?visible:data.notes.filter(n=>!n.spoken&&Number.isFinite(n.pitch));
   const low=nearby.length?Math.min(...nearby.map(n=>n.pitch)):60;
   const high=nearby.length?Math.max(...nearby.map(n=>n.pitch)):72;
   const span=Math.max(24,high-low+8),minPitch=Math.floor((low+high-span)/2),maxPitch=minPitch+span;
@@ -282,8 +282,9 @@ function draw(){
     if(x>=0&&x<w-75){ctx.fillStyle='#9cabc7';ctx.fillText(fmt(sec),x+4,h-100)}
   }
   for(const note of data.notes){const x=px(note.start),right=px(note.end);if(right<0||x>w)continue;
-    const y=py(note.pitch)-8;ctx.fillStyle=note.end<=t?'#4cbfa9':note.start<=t?'#8cf7cd':'#6784cc';
+    const y=note.spoken?h-150:py(note.pitch)-8;ctx.fillStyle=note.spoken?'#dfa55b':note.end<=t?'#4cbfa9':note.start<=t?'#8cf7cd':'#6784cc';
     ctx.fillRect(x,y,Math.max(2,right-x),16);ctx.strokeStyle='#c8e6ff';ctx.strokeRect(x,y,Math.max(2,right-x),16);
+    if(note.spoken&&note.start<=t&&note.end>t){ctx.fillStyle='#ffd59e';ctx.fillText('発話（音高未推定）',12,y-8)}
   }
   ctx.strokeStyle='#ffcf70';ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(w/2,0);ctx.lineTo(w/2,h-120);ctx.stroke();ctx.lineWidth=1;
   const active=currentLine(t);
