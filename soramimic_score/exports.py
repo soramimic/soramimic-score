@@ -58,6 +58,9 @@ def export_midi(document: ScoreDocument) -> bytes:
         end = max(start + 1, round(slot.end_sec * ticks_per_second))
         events.append((start, 2, bytes((0x90, slot.midi_pitch, 80))))
         events.append((end, 0, bytes((0x80, slot.midi_pitch, 0))))
+        if "spoken" in slot.pitch_sources:
+            marker = b"spoken: neutral render pitch, not measured melody"
+            events.append((start, 1, b"\xff\x01" + vlq(len(marker)) + marker))
         if not slot.continuation:
             lyric = slot.kana.encode("utf-8")
             events.append((start, 1, b"\xff\x05" + vlq(len(lyric)) + lyric))
@@ -104,10 +107,15 @@ def export_musicxml(document: ScoreDocument) -> bytes:
     cursor = 0
 
     def add_note(duration: int, pitch: int | None, lyric: str = "",
-                 *, tie_start: bool = False, tie_stop: bool = False) -> None:
+                 *, tie_start: bool = False, tie_stop: bool = False,
+                 spoken: bool = False) -> None:
         note = ET.SubElement(measure, "note")
         if pitch is None:
             ET.SubElement(note, "rest")
+        elif spoken:
+            p = ET.SubElement(note, "unpitched")
+            ET.SubElement(p, "display-step").text = "C"
+            ET.SubElement(p, "display-octave").text = "4"
         else:
             p = ET.SubElement(note, "pitch")
             names = ("C", "C", "D", "D", "E", "F", "F", "G", "G", "A", "A", "B")
@@ -120,6 +128,8 @@ def export_musicxml(document: ScoreDocument) -> bytes:
             ET.SubElement(note, "tie", type="stop")
         if tie_start:
             ET.SubElement(note, "tie", type="start")
+        if spoken:
+            ET.SubElement(note, "notehead").text = "x"
         if tie_start or tie_stop:
             notations = ET.SubElement(note, "notations")
             if tie_stop:
@@ -129,7 +139,7 @@ def export_musicxml(document: ScoreDocument) -> bytes:
         if lyric:
             ET.SubElement(ET.SubElement(note, "lyric"), "text").text = lyric
 
-    def append_interval(end: int, pitch: int | None, lyric: str = "") -> None:
+    def append_interval(end: int, pitch: int | None, lyric: str = "", *, spoken=False) -> None:
         nonlocal cursor
         first_piece = True
         while cursor < end:
@@ -138,7 +148,7 @@ def export_musicxml(document: ScoreDocument) -> bytes:
             more = piece_end < end
             add_note(piece_end - cursor, pitch, lyric if first_piece else "",
                      tie_start=bool(pitch is not None and more),
-                     tie_stop=bool(pitch is not None and not first_piece))
+                     tie_stop=bool(pitch is not None and not first_piece), spoken=spoken)
             cursor = piece_end
             first_piece = False
             if cursor == measure_end:
@@ -149,7 +159,8 @@ def export_musicxml(document: ScoreDocument) -> bytes:
         end = max(start + 1, round(slot.end_sec * 1000))
         if start > cursor:
             append_interval(start, None)
-        append_interval(end, slot.midi_pitch, "" if slot.continuation else slot.kana)
+        append_interval(end, slot.midi_pitch, "" if slot.continuation else slot.kana,
+                        spoken="spoken" in slot.pitch_sources)
     if not list(measure.findall("note")) and measure_number > 1:
         part.remove(measure)
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)

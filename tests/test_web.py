@@ -86,6 +86,28 @@ class ScoreWebTests(unittest.TestCase):
                 self.assertEqual(self.submit().status_code, 200)
                 self.assertEqual(self.submit().status_code, 429)
 
+    def test_spoken_caption_uses_render_timing_with_estimated_provenance(self):
+        from soramimic_score.document import from_linked_observations
+        from soramimic_score.spoken import add_spoken_fallback
+        from soramimic_score.vocal_activity import VocalActivity
+        from tests.test_realization import document
+        self.document = add_spoken_fallback(
+            from_linked_observations(document("カ", 1)), {"u0": (0, 1)},
+            lambda windows: tuple(VocalActivity(-20, -3, 1, True) for _ in windows),
+            fill_unpitched_lines=True,
+        )
+        with patch.dict("os.environ", {"SORAMIMIC_SCORE_SHEETSAGE_MODEL": "a",
+                                     "SORAMIMIC_SCORE_SHEETSAGE_BASE": "b"}):
+            job = self.submit().json()["id"]
+            for _ in range(100):
+                if self.client.get(f"/api/jobs/{job}").json()["state"] == "done":
+                    break
+                time.sleep(.02)
+        score = self.client.get(f"/api/jobs/{job}/score").json()
+        self.assertTrue(score["notes"][0]["spoken"])
+        self.assertEqual(score["moras"][0]["end"], 1)
+        self.assertEqual(score["moras"][0]["source"], "estimated")
+
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
     def test_mp3_upload_is_decoded_before_analysis(self):
         encoded = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-f", "wav",

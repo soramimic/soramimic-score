@@ -325,6 +325,8 @@ def create_app(*, data_root: Path | None = None, analyzer=None, public: bool | N
         observed = {x.id: x for x in document.observations.singing_units}
         moras = {x.id: x.text for x in document.observations.moras}
         by_unit = {}
+        spoken_lines = {slot.singing_unit_id for slot in slots
+                        if slot.timing_source == "spoken_line_proportional"}
         for slot in slots:
             interval = by_unit.setdefault(slot.singing_unit_id,
                                           [slot.start_sec, slot.end_sec, slot.utterance_id])
@@ -334,7 +336,7 @@ def create_app(*, data_root: Path | None = None, analyzer=None, public: bool | N
         for unit_id, (start, end, line) in by_unit.items():
             ids = units[unit_id].mora_ids
             observation = observed.get(unit_id)
-            aligned = (observation is not None
+            aligned = (unit_id not in spoken_lines and observation is not None
                        and has_usable_timing(observation.consonant_start)
                        and has_usable_timing(observation.end)
                        and observation.consonant_start.time_sec < observation.end.time_sec)
@@ -354,7 +356,8 @@ def create_app(*, data_root: Path | None = None, analyzer=None, public: bool | N
                           for line in document.score.canonical
                           if line.utterance_id not in excluded],
                 "notes": [{"start": s.start_sec, "end": s.end_sec, "pitch": s.midi_pitch,
-                           "line": s.utterance_id, "kana": s.kana} for s in slots],
+                           "line": s.utterance_id, "kana": s.kana,
+                           "spoken": "spoken" in s.pitch_sources} for s in slots],
                 "moras": timeline}
 
     @app.get("/api/jobs/{job}/audio")

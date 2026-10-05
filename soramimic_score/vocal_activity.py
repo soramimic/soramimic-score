@@ -37,7 +37,7 @@ def measure_vocal_activity(vocals_path: Path,
     song_levels = frame_dbfs(samples)
     active = song_levels[song_levels >= -70.]
     reference = float(np.percentile(active if len(active) else song_levels, 90))
-    floor = reference - 30.
+    floor = max(-70., reference - 30.)
     evidence = []
     for start_sec, end_sec in windows:
         start = max(0, min(len(samples), round(start_sec * sample_rate)))

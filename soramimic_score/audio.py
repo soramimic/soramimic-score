@@ -240,9 +240,9 @@ def _validate_moras(
     return result
 
 
-def _validate_notes(notes: Sequence[MelodyNote]) -> tuple[MelodyNote, ...]:
+def _validate_notes(notes: Sequence[MelodyNote], *, allow_empty: bool = False) -> tuple[MelodyNote, ...]:
     result = tuple(notes)
-    if not result:
+    if not result and not allow_empty:
         raise AudioPipelineError("melody", "no melody notes were produced")
     previous_end = 0.0
     for item in result:
@@ -264,12 +264,13 @@ def build_audio_observations(
     readings: Sequence[ReadingSelection],
     aligned_moras: Sequence[AlignedMora],
     melody_notes: Sequence[MelodyNote],
+    *, allow_empty_melody: bool = False,
 ) -> IntermediateRepresentation:
     """Normalize adapter results into the versioned observation document."""
     lines = _validate_lines(lines, timed=False)
     readings = _validate_readings(lines, readings)
     aligned_moras = _validate_moras(readings, aligned_moras)
-    melody_notes = _validate_notes(melody_notes)
+    melody_notes = _validate_notes(melody_notes, allow_empty=allow_empty_melody)
 
     canonical_text = "\n".join(line.text for line in lines)
     spans: list[LyricSpan] = []
@@ -423,7 +424,9 @@ def analyze_audio(
         _run_adapter("lyrics", adapters.lyric_recognizer, path)))
     if on_progress:
         on_progress("音符と音高を推定しています")
-    notes = _validate_notes(_run_adapter("melody", adapters.melody_transcriber, path))
+    allow_spoken = lyrics is None and adapters.vocal_activity is not None
+    notes = _validate_notes(_run_adapter("melody", adapters.melody_transcriber, path),
+                            allow_empty=allow_spoken)
     recognized_lines = []
     semantic_evidence = []
     credit_recovered: set[LyricLine] = set()
@@ -865,7 +868,8 @@ def analyze_audio(
         # Stage 3 owns note assignment. Probe once before retrying truly unowned
         # note runs; a raw gap between Whisper lines is not sufficient evidence.
         provisional = compile_score(
-            build_audio_observations(lines, readings, moras, notes),
+            build_audio_observations(lines, readings, moras, notes,
+                                     allow_empty_melody=allow_spoken),
             config=NoteRunConfig(whisper_boundary_cost_per_sec2=.1),
             line_windows_by_utterance={
                 f"u{index}": (line.start_sec, line.end_sec)
@@ -1182,7 +1186,8 @@ def analyze_audio(
             moras = _validate_moras(readings, moras)
     if on_progress:
         on_progress("楽譜データを組み立てています")
-    observations = build_audio_observations(lines, readings, moras, notes)
+    observations = build_audio_observations(lines, readings, moras, notes,
+                                             allow_empty_melody=allow_spoken)
     if semantic_evidence:
         observations = replace(observations,
                                evidence=observations.evidence + tuple(semantic_evidence))
@@ -1219,4 +1224,12 @@ def analyze_audio(
         line_windows_by_utterance=line_windows,
         vocalization_reattacks_by_utterance=reattacks if reattacks else None,
     )
+    if allow_spoken:
+        from .spoken import add_spoken_fallback
+        result = add_spoken_fallback(
+            result, {f"u{i}": (line.start_sec, line.end_sec) for i, line in enumerate(lines)
+                     if line.start_sec is not None and line.end_sec is not None},
+            lambda windows: _run_adapter("vocal activity", adapters.vocal_activity, path, windows),
+            fill_unpitched_lines=True,
+        )
     return attach_lyric_surface(result, overlay) if overlay is not None else result
