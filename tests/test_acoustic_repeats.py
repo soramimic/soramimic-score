@@ -13,7 +13,8 @@ from soramimic_score.acoustic_repeats import (
 from soramimic_score.japanese import kana_to_moras
 from soramimic_score.repetition_repair import (
     copies_needing_repair, has_foreign_transcript, merge_recovered_notes, missing_note_windows,
-    needs_pronunciation_repair, phase_aligned_moras, replace_pronunciation_spans, vowel_distance)
+    needs_pronunciation_repair, phase_aligned_moras, preserve_neighbor_readings,
+    replace_pronunciation_spans, vowel_distance)
 
 
 class RepetitionRepairTests(unittest.TestCase):
@@ -78,6 +79,89 @@ class RepetitionRepairTests(unittest.TestCase):
         lines, readings, moras = replace_pronunciation_spans((line,), (reading,), moras, (replacement,))
         self.assertEqual([l.text for l in lines], ['アオ', 'ウ', 'ソラ'])
         self.assertEqual([(m.line_index, m.mora_index) for m in moras], [(0,0),(0,1),(1,0),(2,0),(2,1)])
+
+    def neighbor_fixture(self):
+        lines = (LyricLine('Some phrase', 0., 2.), LyricLine('青空', 2., 5.))
+        readings = (ReadingSelection('カキクケコ', 'test', .9),
+                    ReadingSelection('アオゾラ', 'test', .9))
+        original = tuple(AlignedMora(0, i, k, i*.3, i*.3+.1, .9)
+                         for i, k in enumerate('カキクケコ'))
+        original += tuple(AlignedMora(1, i, k, t, t+.04, .9)
+                          for i, (k, t) in enumerate(zip('アオゾラ', (2.1, 4.1, 4.3, 4.5))))
+        copies = tuple(AcousticOccurrence(float(i*2), float(i*2+2), .8, 'カキクケコ')
+                       for i in range(2))
+        group = AcousticRepetition('カキクケコ', 0., 2., copies, (.06, .4, .8, 1.2, 1.6), 0.)
+        aligned = phase_aligned_moras(group, copies)
+        replacements = tuple((LyricLine(group.kana, c.start_sec, c.end_sec), readings[0],
+                              tuple(replace(m, line_index=0) for m in aligned if m.line_index==i))
+                             for i, c in enumerate(copies))
+        return lines, readings, original, replacements
+
+    def test_clipped_neighbor_is_kept_whole_and_realigned_after_two_copies(self):
+        lines, readings, original, replacements = self.neighbor_fixture()
+        calls = []
+        def realign(line, reading):
+            calls.append((line, reading))
+            return tuple(AlignedMora(0, i, k, 4.1+i*.15, 4.15+i*.15, .8)
+                         for i, k in enumerate('アオゾラ'))
+        lines, moras, accepted = preserve_neighbor_readings(
+            lines, readings, original, replacements, realign)
+        self.assertEqual(calls, [(LyricLine('青空', 4., 5.), readings[1])])
+        self.assertEqual(accepted, replacements)
+        updated, selected, aligned = replace_pronunciation_spans(lines, readings, moras, accepted)
+        self.assertEqual([l.text for l in updated], ['カキクケコ', 'カキクケコ', '青空'])
+        self.assertEqual(selected[-1], readings[1])
+        self.assertEqual(''.join(m.kana for m in aligned if m.line_index==2), 'アオゾラ')
+        self.assertGreaterEqual(min(m.start_sec for m in aligned if m.line_index==2), 4.)
+
+    def test_neighbor_before_a_repeat_keeps_its_last_mora(self):
+        line = LyricLine('青空', 0., 3.)
+        reading = ReadingSelection('アオゾラ', 'test', .9)
+        original = tuple(AlignedMora(0, i, k, t, t+.04, .9)
+                         for i, (k,t) in enumerate(zip('アオゾラ', (.1,.3,.5,2.1))))
+        replacement = self.neighbor_fixture()[3][1]
+        calls = []
+        def realign(neighbor, selected):
+            calls.append(neighbor)
+            return tuple(AlignedMora(0,i,k,.1+i*.3,.2+i*.3,.8)
+                         for i,k in enumerate('アオゾラ'))
+        lines, moras, accepted = preserve_neighbor_readings(
+            (line,), (reading,), original, (replacement,), realign)
+        self.assertEqual(calls, [LyricLine('青空', 0., 2.)])
+        updated, _, aligned = replace_pronunciation_spans(lines, (reading,), moras, accepted)
+        self.assertEqual([l.text for l in updated], ['青空','カキクケコ'])
+        self.assertEqual(''.join(m.kana for m in aligned if m.line_index==0), 'アオゾラ')
+
+    def test_failed_neighbor_alignment_withdraws_only_the_conflicting_copy(self):
+        lines, readings, original, replacements = self.neighbor_fixture()
+        def fail(_line, _reading):
+            raise ValueError('cannot align this window')
+        updated, moras, accepted = preserve_neighbor_readings(
+            lines, readings, original, replacements, fail)
+        self.assertEqual(updated, lines)
+        self.assertEqual(moras, original)
+        self.assertEqual(accepted, replacements[:1])
+        updated, _, aligned = replace_pronunciation_spans(updated, readings, moras, accepted)
+        self.assertEqual([l.text for l in updated], ['カキクケコ', '青空'])
+        self.assertEqual(tuple(m for m in aligned if m.line_index==1), original[5:])
+
+    def test_neighbor_alignment_cannot_reuse_old_anchors_inside_the_repeat(self):
+        lines, readings, original, replacements = self.neighbor_fixture()
+        updated, moras, accepted = preserve_neighbor_readings(
+            lines, readings, original, replacements,
+            lambda _line, _reading: tuple(replace(m, line_index=0) for m in original[5:]))
+        self.assertEqual((updated, moras, accepted), (lines, original, replacements[:1]))
+
+    def test_partial_reading_that_matches_the_refrain_is_not_protected_as_a_neighbor(self):
+        lines, readings, original, replacements = self.neighbor_fixture()
+        readings = (readings[0], ReadingSelection('ガギグゲゴ','test',.9))
+        original = original[:5] + tuple(AlignedMora(1,i,k,t,t+.04,.9)
+                                       for i,(k,t) in enumerate(zip('ガギグゲゴ',(2.1,2.3,4.1,4.3,4.5))))
+        calls=[]
+        updated, moras, accepted = preserve_neighbor_readings(
+            lines, readings, original, replacements, lambda *args: calls.append(args))
+        self.assertFalse(calls)
+        self.assertEqual((updated, moras, accepted), (lines, original, replacements))
 
     def test_foreign_line_is_not_removed_when_only_half_is_replaced(self):
         line = LyricLine('Looking into the sky', 0., 4.)
@@ -148,6 +232,32 @@ class RepetitionRepairTests(unittest.TestCase):
         self.assertEqual(calls, [(0.,3.)])
         self.assertTrue(any(e.kind=='melody-local-retry' for e in result.observations.evidence))
         self.assertFalse(any(e.kind=='lyric-acoustic-repetition' for e in supplied.observations.evidence))
+
+    def test_pipeline_preserves_neighbor_and_reports_only_applied_repetitions(self):
+        lines, selected, initial, _ = self.neighbor_fixture()
+        copies = tuple(AcousticOccurrence(float(i*2), float(i*2+2), .8, 'カキクケコ')
+                       for i in (0,1,3,4))
+        group = AcousticRepetition('カキクケコ', 0., 2., copies, (.06,.4,.8,1.2,1.6), 0.)
+        calls=[]
+        def readings(_p, ls):
+            return tuple(selected[1] if l.text=='青空' else selected[0] for l in ls)
+        def align(_p, ls, rs):
+            if len(ls)==1 and ls[0].start_sec==4.:
+                calls.append(ls[0])
+                raise ValueError('neighbor alignment failed')
+            return initial
+        adapters=AudioAdapters(readings, align, lambda _: (MelodyNote(0.,10.,60),),
+                               lambda _: lines, phonetic_recognizer=lambda _p,_w: (),
+                               acoustic_repetition_recognizer=lambda _p,_e,_n: (group,))
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'test.wav';path.write_bytes(b'adapter fixture')
+            result=analyze_audio(path,adapters)
+        self.assertEqual(calls, [LyricLine('青空',4.,5.)])
+        self.assertEqual(result.score.canonical_text, '\n'.join(['カキクケコ','青空','カキクケコ','カキクケコ']))
+        evidence, = (e for e in result.observations.evidence if e.kind=='lyric-acoustic-repetition')
+        self.assertEqual(evidence.detail['observed_count'],4)
+        self.assertEqual(evidence.detail['repaired_count'],3)
+        self.assertEqual(evidence.detail['applied_windows_sec'],[[0.,2.],[6.,8.],[8.,10.]])
 
 
 @unittest.skipUnless(importlib.util.find_spec('numpy') and importlib.util.find_spec('scipy'),

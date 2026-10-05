@@ -85,6 +85,84 @@ def needs_pronunciation_repair(kana, occurrence, moras):
     return not owned or vowel_distance(kana, current) > .35
 
 
+def preserve_neighbor_readings(lines, readings, moras, replacements, realign):
+    """Keep a neighboring reading whole when a repeat clips its first/last morae.
+
+    Most of the neighbor must lie outside the replacement, and its vowels must
+    differ from the refrain. Re-align that existing reading in the remaining
+    audio window; never invent a time by squeezing or shifting its old anchors.
+    If it cannot fit, withdraw the conflicting copies instead of deleting part
+    of the neighbor. Recompute from the originals after each withdrawal.
+    """
+    from .audio import _validate_moras
+    original_by_line = [tuple(m for m in moras if m.line_index == index)
+                        for index in range(len(lines))]
+    pending = tuple(replacements)
+    cache = {}
+    while pending:
+        changed = {}
+        rejected = set()
+        for index, (line, reading, original) in enumerate(
+                zip(lines, readings, original_by_line, strict=True)):
+            owners = [tuple(j for j, (copy, _, _) in enumerate(pending)
+                            if copy.start_sec <= (m.start_sec + m.end_sec) / 2 < copy.end_sec)
+                      for m in original]
+            kept = [i for i, copies in enumerate(owners) if not copies]
+            if not kept or len(kept) == len(original) or len(kept) * 2 < len(original):
+                continue
+            # An interior replacement may legitimately split a longer phrase.
+            # This guard only protects a contiguous neighbor on one side.
+            if kept not in (list(range(len(kept))),
+                            list(range(len(original) - len(kept), len(original)))):
+                continue
+            conflicts = {j for copies in owners for j in copies}
+            if any(vowel_distance(reading.kana, pending[j][1].kana * count) <= .35
+                   for j in conflicts
+                   for count in range(1, len(original) // len(kana_to_moras(pending[j][1].kana)) + 2)):
+                continue
+            windows = [(line.start_sec, line.end_sec)]
+            for copy, _, _ in pending:
+                following = []
+                for start, end in windows:
+                    if start < copy.end_sec and end > copy.start_sec:
+                        if start < copy.start_sec:
+                            following.append((start, copy.start_sec))
+                        if end > copy.end_sec:
+                            following.append((copy.end_sec, end))
+                    else:
+                        following.append((start, end))
+                windows = following
+            midpoints = [(original[i].start_sec + original[i].end_sec) / 2 for i in kept]
+            window = next(((start, end) for start, end in windows
+                           if all(start <= point < end for point in midpoints)), None)
+            if window is None:
+                rejected.update(conflicts)
+                continue
+            start, end = window
+            neighbor = replace(line, start_sec=start, end_sec=end)
+            key = (index, start, end)
+            if key not in cache:
+                try:
+                    aligned = _validate_moras((reading,), realign(neighbor, reading))
+                    if any(m.start_sec < start or m.end_sec > end for m in aligned):
+                        raise ValueError("neighbor alignment escaped its remaining window")
+                    cache[key] = aligned
+                except Exception:
+                    cache[key] = None
+            aligned = cache[key]
+            if aligned is None:
+                rejected.update(conflicts)
+            else:
+                changed[index] = (neighbor, tuple(replace(m, line_index=index) for m in aligned))
+        if rejected:
+            pending = tuple(item for j, item in enumerate(pending) if j not in rejected)
+            continue
+        return (tuple(changed.get(i, (line, ()))[0] for i, line in enumerate(lines)),
+                tuple(m for i, original in enumerate(original_by_line)
+                      for m in changed.get(i, (None, original))[1]), pending)
+    return tuple(lines), tuple(moras), ()
+
+
 def replace_pronunciation_spans(lines, readings, moras, replacements):
     """Keep untouched lines verbatim and retain any uncovered line fragments."""
     from .audio import LyricLine, ReadingSelection
