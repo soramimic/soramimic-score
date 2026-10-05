@@ -19,6 +19,36 @@ def voiced(windows):
 
 
 class SpokenTests(unittest.TestCase):
+    def test_voiced_unpitched_line_uses_asr_window_even_without_ctc_anchors(self):
+        before = from_linked_observations(document(observed=0))
+        after = add_spoken_fallback(before, {"u0": (1, 4)}, voiced,
+                                    fill_unpitched_lines=True)
+        self.assertEqual([(s.kana, s.start_sec, s.end_sec) for s in after.score.synthesis_plan],
+                         [("カ", 1, 2), ("キ", 2, 3), ("ク", 3, 4)])
+        self.assertEqual(before.observations.singing_units, after.observations.singing_units)
+        self.assertFalse(after.observations.note_candidates)
+        self.assertFalse(after.score.unresolved_unit_ids)
+        self.assertTrue(all(s.timing_source == "spoken_line_proportional"
+                            for s in after.score.synthesis_plan))
+
+    def test_unpitched_line_does_not_expand_past_existing_sung_slots(self):
+        before = from_linked_observations(linked(document(), [
+            ("match", ("s0",), ("n0",)), ("unit_only", ("s1",), ()),
+            ("unit_only", ("s2",), ()),
+        ], [NoteCandidate("n0", 0, .5, 67, .8, ("test",))]))
+        after = add_spoken_fallback(before, {"u0": (0, .9)}, voiced,
+                                    fill_unpitched_lines=True)
+        self.assertEqual(after.score.synthesis_plan[0], before.score.synthesis_plan[0])
+        self.assertEqual(after.score.unresolved_unit_ids, ("s1",))
+        self.assertEqual(after.score.synthesis_plan[-1].start_sec, .6)
+
+    def test_silent_unpitched_line_stays_unresolved(self):
+        before = from_linked_observations(document(observed=0))
+        after = add_spoken_fallback(before, {"u0": (0, 3)},
+            lambda windows: tuple(VocalActivity(-90, -70, 0, False) for _ in windows),
+            fill_unpitched_lines=True)
+        self.assertEqual(after, before)
+
     def test_short_token_peaks_become_audible_intervals_without_changing_observations(self):
         ir = document()
         ir = replace(ir, singing_units=tuple(

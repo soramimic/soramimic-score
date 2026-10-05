@@ -1230,5 +1230,6 @@ def analyze_audio(
             result, {f"u{i}": (line.start_sec, line.end_sec) for i, line in enumerate(lines)
                      if line.start_sec is not None and line.end_sec is not None},
             lambda windows: _run_adapter("vocal activity", adapters.vocal_activity, path, windows),
+            fill_unpitched_lines=True,
         )
     return attach_lyric_surface(result, overlay) if overlay is not None else result
