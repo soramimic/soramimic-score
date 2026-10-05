@@ -217,8 +217,10 @@ Python からは `analyze_audio(..., lyrics=lines, adjust_lyrics=True)` と指�
 Demucs の取得済み重みを指定する場合は、`--demucs-checkpoint models/955717e8-8726e21a.th` を追加します。
 指定しなければ PyTorch のモデルキャッシュを使います。
 
-歌詞の自動認識で欠けた歌唱区間をカタカナで補うには、`--romaji-model /path/to/RomajiASR` を追加します。
-配置先には `model.onnx` と `phoneme_vocab.json` が必要です。RomajiASR が認識した発音のうち、音符があり、既存の歌詞の整列範囲に含まれない部分を残します。
+歌詞の反復や欠けた歌唱区間を補うには、`--romaji-model /path/to/RomajiASR` を追加します。
+配置先には `model.onnx` と `phoneme_vocab.json` が必要です。
+Whisper が短いフレーズの反復を省略した場合、RomajiASR の発音列から別々の時刻に歌われた回数を確かめ、認識済みの語句を補います。各回の読みは、それぞれの音声区間へ整列し直します。発音が近似的に一致する場合は音符の裏付けも必要です。長く伸ばした音だけから回数を増やすことはありません。
+語句が分からない部分では、RomajiASR が認識した発音のうち、音符があり、既存の歌詞の整列範囲に含まれない部分をカタカナで残します。
 カタカナは意味を確定した歌詞ではなく、推定した発音です。認識元と時刻の根拠を Score JSON に保存します。入力歌詞を指定した場合は補完しません。
 Python では `ModelConfig(romaji_model=...)`、ブラウザでは `SORAMIMIC_SCORE_ROMAJI_MODEL` でモデルの配置先を指定できます。
 
