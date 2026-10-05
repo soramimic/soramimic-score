@@ -1030,8 +1030,14 @@ def analyze_audio(
                               *((a.end_sec + b.start_sec) / 2
                                 for a, b in zip(found, found[1:])),
                               original.end_sec)
-                copies = tuple(replace(original, text=proposal.text, start_sec=a, end_sec=b)
-                               for a, b in zip(boundaries, boundaries[1:]))
+                # The phonetic recognizer may recover only some occurrences.
+                # Keep unmatched audio available to gap recovery instead of
+                # stretching the nearest copy across that unrecognized span.
+                copies = tuple(replace(
+                    original, text=proposal.text,
+                    start_sec=max(a, occurrence.start_sec - .25),
+                    end_sec=min(b, occurrence.end_sec + .25),
+                ) for a, b, occurrence in zip(boundaries, boundaries[1:], found))
                 unit_reading = readings[index]
                 if proposal.original_count > 1:
                     unit_reading = replace(

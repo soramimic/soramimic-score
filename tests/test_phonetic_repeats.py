@@ -116,12 +116,40 @@ class PhoneticRepetitionTests(unittest.TestCase):
         self.assertEqual(document.score.canonical_text, '青い空\n青い空\n白い雲')
         self.assertEqual(len(aligned_calls), 2)
         self.assertEqual(len(aligned_calls[1]), 2)
-        self.assertEqual(aligned_calls[1][0].end_sec, aligned_calls[1][1].start_sec)
+        self.assertLessEqual(aligned_calls[1][0].end_sec, aligned_calls[1][1].start_sec)
         self.assertEqual(document.observations.readings[-1].kana, 'シロイクモ')
         evidence, = (e for e in document.observations.evidence
                       if e.kind == 'lyric-phonetic-repetition')
         self.assertEqual(evidence.detail['recovered_count'], 2)
         self.assertFalse(evidence.detail['confidence_available'])
+
+    def test_partial_repetition_recovery_leaves_other_singing_available_to_gap_decoder(self):
+        line = replace(self.line, end_sec=10.)
+        notes = tuple(MelodyNote(i * .2, (i + 1) * .2, 60) for i in range(50))
+        repeats = tuple(replace(e, start_sec=e.start_sec + shift,
+                                end_sec=e.end_sec + shift)
+                        for shift in (1., 7.) for e in self.events[:5])
+        gap = tuple(PhoneticMora(kana, 4. + i * .2, 4.1 + i * .2)
+                    for i, kana in enumerate('シロイクモ'))
+
+        def align(_path, lines, selected):
+            return tuple(AlignedMora(index, i, kana,
+                                      item.start_sec + i * (item.end_sec - item.start_sec) / 5,
+                                      item.start_sec + (i + 1) * (item.end_sec - item.start_sec) / 5,
+                                      .9)
+                         for index, (item, reading) in enumerate(zip(lines, selected))
+                         for i, kana in enumerate(kana_to_moras(reading.kana)))
+
+        adapters = AudioAdapters(
+            lambda _p, _l: (self.reading,), align, lambda _: notes, lambda _: (line,),
+            phonetic_recognizer=lambda _p, _w: gap,
+            phonetic_repetition_recognizer=lambda _p, _w: repeats,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'input.wav'
+            path.write_bytes(b'adapter fixture')
+            document = analyze_audio(path, adapters)
+        self.assertEqual(document.score.canonical_text, '青い空\nシロイクモ\n青い空')
 
     def test_failed_realignment_keeps_original(self):
         def align(_path, lines, _readings):
