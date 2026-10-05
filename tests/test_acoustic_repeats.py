@@ -12,7 +12,7 @@ from soramimic_score.acoustic_repeats import (
     pronunciation_agreement, repetitions_from_features)
 from soramimic_score.japanese import kana_to_moras
 from soramimic_score.repetition_repair import (
-    has_foreign_transcript, merge_recovered_notes, missing_note_windows,
+    copies_needing_repair, has_foreign_transcript, merge_recovered_notes, missing_note_windows,
     needs_pronunciation_repair, phase_aligned_moras, replace_pronunciation_spans, vowel_distance)
 
 
@@ -45,6 +45,15 @@ class RepetitionRepairTests(unittest.TestCase):
                       for i, k in enumerate('ガギグゲゴ'))
         self.assertFalse(needs_pronunciation_repair('カキクケコ', occurrence, moras))
         self.assertTrue(needs_pronunciation_repair('カキクケコ', occurrence, moras[:2]))
+
+    def test_partly_collapsed_foreign_refrain_uses_a_consistent_pronunciation(self):
+        copies = tuple(AcousticOccurrence(float(i*2), float((i+1)*2), .8, 'カキクケコ') for i in range(4))
+        group = AcousticRepetition('カキクケコ', 0., 2., copies)
+        lines = tuple(LyricLine('Look into the sky', c.start_sec, c.end_sec) for c in copies)
+        moras = tuple(AlignedMora(j,i,k,j*2+i*.3,j*2+i*.3+.1,.9)
+                      for j in range(4) for i,k in enumerate('カキクケコ'))
+        self.assertEqual(copies_needing_repair(group, lines, moras), ())
+        self.assertEqual(copies_needing_repair(group, lines, moras[:15]), copies)
 
     def test_replacement_retains_neighbor_inside_a_broad_asr_window(self):
         lines = (LyricLine('Some phrase', 0., 2.), LyricLine('青い空', 2., 5.))

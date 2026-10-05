@@ -27,6 +27,18 @@ def has_foreign_transcript(repetition, lines):
     return False
 
 
+def copies_needing_repair(group, lines, moras):
+    missing = tuple(needs_pronunciation_repair(group.kana, copy, moras)
+                    for copy in group.occurrences)
+    if not any(missing):
+        return ()
+    # Once a collapsed foreign transcript needs repair, give its other copies
+    # the same pronunciation and measured timing. Mixing repaired and old
+    # foreign readings would leave the refrain's syllable count inconsistent.
+    return tuple(copy for copy, repair in zip(group.occurrences, missing, strict=True)
+                 if repair or has_foreign_transcript(replace(group, occurrences=(copy,)), lines))
+
+
 def phase_aligned_moras(group, copies):
     """Transfer observed pronunciation phases through measured acoustic copies."""
     from .audio import AlignedMora

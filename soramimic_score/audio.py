@@ -1094,8 +1094,8 @@ def analyze_audio(
                                           tuple(updated_moras))
             if adapters.acoustic_repetition_recognizer is not None:
                 from .repetition_repair import (
-                    has_foreign_transcript, merge_recovered_notes, missing_note_windows,
-                    needs_pronunciation_repair, phase_aligned_moras, replace_pronunciation_spans)
+                    copies_needing_repair, has_foreign_transcript, merge_recovered_notes,
+                    missing_note_windows, phase_aligned_moras, replace_pronunciation_spans)
                 groups = _run_adapter("acoustic repetition recognition",
                                       adapters.acoustic_repetition_recognizer, path, events, notes)
                 acoustic_replacements = []
@@ -1104,8 +1104,7 @@ def analyze_audio(
                     if not has_foreign_transcript(group, lines):
                         continue
                     copies = tuple(LyricLine(group.kana, copy.start_sec, copy.end_sec)
-                                   for copy in group.occurrences
-                                   if needs_pronunciation_repair(group.kana, copy, moras))
+                                   for copy in copies_needing_repair(group, lines, moras))
                     if not copies:
                         continue
                     selection = ReadingSelection(
