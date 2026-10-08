@@ -83,11 +83,16 @@ _BASE.update({"ヤ": ("y", "a"), "ユ": ("y", "u"), "ヨ": ("y", "o"),
 _IRREGULAR = {"シ": "sh", "チ": "ch", "ツ": "ts", "フ": "f", "ジ": "j", "ヂ": "j"}
 _SMALL_VOWELS = {"ァ": "a", "ィ": "i", "ゥ": "u", "ェ": "e", "ォ": "o",
                   "ャ": "a", "ュ": "u", "ョ": "o", "ヮ": "a"}
+_STANDALONE_SMALL_KANA = str.maketrans("ァィゥェォャュョヮヵヶ", "アイウエオヤユヨワカケ")
 
 
 def phonemes_for_mora(mora: str, previous_vowel: str | None = None) -> tuple[str, ...]:
     """Return a compact Japanese phoneme sequence for one retained mora."""
     mora = katakana(mora)
+    # A retained small kana can stand alone at a reading boundary or after a
+    # special mora. Normalize only its sound; reading and mora text stay intact.
+    if len(mora) == 1:
+        mora = mora.translate(_STANDALONE_SMALL_KANA)
     if mora == "ー":
         return (previous_vowel or "a",)
     if mora == "ン":
