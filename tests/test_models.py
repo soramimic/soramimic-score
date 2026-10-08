@@ -162,7 +162,7 @@ class ModelTests(unittest.TestCase):
                                    "--sheetsage-base", str(self.config.sheetsage_base),
                                    "--lyrics", str(lyrics), "--adjust-lyrics"])
         self.assertEqual(result, 0)
-        self.assertEqual(load(output).score.canonical_text, "空")
+        self.assertEqual(load(output).score.canonical_text, "耳\n空")
         self.assertEqual(lyrics.read_text(encoding="utf-8"), "耳\n空")
 
     def test_lab_normalizes_overlap_and_preserves_pitch(self):

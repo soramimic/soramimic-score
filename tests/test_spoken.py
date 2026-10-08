@@ -136,10 +136,10 @@ class SpokenTests(unittest.TestCase):
             self.assertFalse(result.observations.note_candidates)
             with self.assertRaisesRegex(AudioPipelineError, "no melody"):
                 analyze_audio(audio, replace(adapters, vocal_activity=None))
-            with self.assertRaisesRegex(AudioPipelineError, "no melody"):
-                analyze_audio(audio, adapters, lyrics=("カキ",))
+            supplied = analyze_audio(audio, adapters, lyrics=("カキ",))
+            self.assertEqual([s.kana for s in supplied.score.synthesis_plan], ["カ", "キ"])
 
-    def test_partial_melody_fallback_is_only_for_automatic_lyrics(self):
+    def test_partial_melody_fallback_also_preserves_supplied_spoken_lyrics(self):
         adapters = AudioAdapters(
             lambda _p, lines: tuple(ReadingSelection(l.text, "test", 1) for l in lines),
             lambda _p, _l, _r: (AlignedMora(0, 0, "カ", 0, .02, .9),
@@ -155,7 +155,7 @@ class SpokenTests(unittest.TestCase):
             automatic = analyze_audio(audio, adapters)
             supplied = analyze_audio(audio, adapters, lyrics=("カキ", "ク"))
             self.assertEqual([s.kana for s in automatic.score.synthesis_plan], ["カ", "キ", "ク"])
-            self.assertEqual([s.kana for s in supplied.score.synthesis_plan], ["ク"])
+            self.assertEqual([s.kana for s in supplied.score.synthesis_plan], ["カ", "キ", "ク"])
             self.assertEqual(automatic.score.synthesis_plan[-1], supplied.score.synthesis_plan[-1])
 
     @unittest.skipUnless(importlib.util.find_spec("soundfile"), "audio dependencies unavailable")

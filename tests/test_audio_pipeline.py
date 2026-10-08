@@ -57,7 +57,8 @@ class AudioPipelineTests(unittest.TestCase):
     @staticmethod
     def _readings(_path, lines):
         table = {"空": "ソラ", "耳": "ミミ"}
-        return tuple(ReadingSelection(table[line.text], "test-reading", .9) for line in lines)
+        return tuple(ReadingSelection("".join(table[text] for text in line.text.splitlines()),
+                                      "test-reading", .9) for line in lines)
 
     @staticmethod
     def _moras(_path, _lines, readings):
@@ -279,18 +280,26 @@ class AudioPipelineTests(unittest.TestCase):
         score = analyze_audio(self.audio, adapters, lyrics=(credit,))
         self.assertEqual(score.score.canonical_text, credit)
 
-    def test_known_lyrics_run_recognition_and_preserve_acoustic_result(self):
+    def test_known_lyrics_preserve_unrecognized_input_in_canonical_text(self):
         def reject(_path):
             return (LyricLine("空", 0, .4), LyricLine("耳", .4, .8))
 
+        def readings(path, lines):
+            table = {"空": "ソラ", "耳": "ミミ", "遠い星": "トオイホシ"}
+            return tuple(ReadingSelection(table[line.text], "test", .9) for line in lines)
+
         score = analyze_audio(
             self.audio,
-            AudioAdapters(self._readings, self._moras, self._melody, reject),
+            AudioAdapters(readings, self._moras, self._melody, reject,
+                          audio_duration=lambda _: 2,
+                          vocal_activity=lambda _path, windows: tuple(
+                              VocalActivity(-100, -90, 0, False) for _ in windows)),
             lyrics=("空", "耳", "遠い星"),
         )
-        self.assertEqual(score.score.canonical_text, "空\n耳")
+        self.assertEqual(score.score.canonical_text, "空\n耳\n遠い星")
         self.assertEqual(lyric_surface(score)["supplied_lines"], ["空", "耳", "遠い星"])
-        self.assertEqual(lyric_surface(score)["unused_supplied_indices"], [2])
+        self.assertEqual(lyric_surface(score)["unused_supplied_indices"], [])
+        self.assertEqual(lyric_surface(score)["unobserved_supplied_indices"], [2])
 
     def test_observation_builder_marks_uncalibrated_note_confidence(self):
         document = build_audio_observations(
@@ -312,20 +321,20 @@ class AudioPipelineTests(unittest.TestCase):
             self.audio,
             AudioAdapters(self._readings, self._moras, self._melody,
                           lambda _: (LyricLine("空", 0, .4), LyricLine("空", .4, .8))),
-            lyrics=("耳", "空"), adjust_lyrics=True,
+            lyrics=("空",), adjust_lyrics=True,
         )
         self.assertEqual(score.score.canonical_text, "空\n空")
         audit = next(item for item in score.observations.evidence if item.kind == "lyric-adjustment")
-        self.assertEqual(audit.detail["supplied_lines"], ["耳", "空"])
-        self.assertEqual([row["operation"] for row in audit.detail["decisions"]],
-                         ["keep", "repeat", "remove"])
+        self.assertEqual(audit.detail["supplied_lines"], ["空"])
+        self.assertCountEqual([row["operation"] for row in audit.detail["decisions"]],
+                              ["match", "repeat"])
 
-    def test_adjustment_requires_known_lyrics_and_a_recognizer(self):
+    def test_adjustment_requires_known_lyrics_but_recognition_is_optional(self):
         adapters = AudioAdapters(self._readings, self._moras, self._melody)
         with self.assertRaisesRegex(ValueError, "requires supplied lyrics"):
             analyze_audio(self.audio, adapters, adjust_lyrics=True)
-        with self.assertRaisesRegex(AudioPipelineError, "requires a recognizer"):
-            analyze_audio(self.audio, adapters, lyrics=("空",), adjust_lyrics=True)
+        result = analyze_audio(self.audio, adapters, lyrics=("空",), adjust_lyrics=True)
+        self.assertEqual(result.score.canonical_text, "空")
 
     def test_inconsistent_mora_result_is_rejected_before_compilation(self):
         def bad_moras(_path, _lines, _readings):
