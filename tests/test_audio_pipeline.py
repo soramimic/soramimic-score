@@ -293,7 +293,7 @@ class AudioPipelineTests(unittest.TestCase):
             AudioAdapters(readings, self._moras, self._melody, reject,
                           audio_duration=lambda _: 2,
                           vocal_activity=lambda _path, windows: tuple(
-                              VocalActivity(-100, -90, 0, False) for _ in windows)),
+                              VocalActivity(-100, -90, 0, False, silence_confirmed=True) for _ in windows)),
             lyrics=("空", "耳", "遠い星"),
         )
         self.assertEqual(score.score.canonical_text, "空\n耳\n遠い星")

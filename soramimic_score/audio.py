@@ -275,9 +275,10 @@ def build_audio_observations(
     aligned_moras: Sequence[AlignedMora],
     melody_notes: Sequence[MelodyNote],
     *, allow_empty_melody: bool = False, unobserved_line_indices: Sequence[int] = (),
+    allow_empty_lyrics: bool = False,
 ) -> IntermediateRepresentation:
     """Normalize adapter results into the versioned observation document."""
-    lines = _validate_lines(lines, timed=False)
+    lines = _validate_lines(lines, timed=False) if lines or not allow_empty_lyrics else ()
     readings = _validate_readings(lines, readings)
     aligned_moras = _validate_moras(readings, aligned_moras,
                                    unobserved_line_indices=unobserved_line_indices)
@@ -385,7 +386,9 @@ def analyze_audio(
 
     Supplied text is authoritative even when recognition disagrees. Recognition
     supplies interval hints; neighboring anchors bound unresolved input. Optional
-    whole-line additions require ``adjust_lyrics=True`` and never delete input.
+    whole-line additions require ``adjust_lyrics=True``. With that option, a
+    fully measured window with no melody, recognition or vocal evidence may be
+    removed; original text and removal evidence remain in the audit.
     """
     from .japanese import strip_ruby
     from .surface import attach_lyric_surface
@@ -763,7 +766,8 @@ def analyze_audio(
     if lyrics is not None:
         from .supplied_lyrics import prepare_supplied_audio
         lines, overlay, unobserved_lines = prepare_supplied_audio(
-            path, lyrics, recognized, notes, adapters, add_missing=adjust_lyrics,
+            path, lyrics, recognized, notes, adapters, adjust_lyrics=adjust_lyrics,
+            recognition_evidence=raw_recognized if adapters.lyric_recognizer is not None else None,
         )
 
     # Only the final text reaches the selector. Its closed candidates contain
@@ -1208,18 +1212,26 @@ def analyze_audio(
         on_progress("楽譜データを組み立てています")
     observations = build_audio_observations(lines, readings, moras, notes,
                                              allow_empty_melody=allow_spoken or lyrics is not None,
-                                             unobserved_line_indices=unobserved_lines)
+                                             unobserved_line_indices=unobserved_lines,
+                                             allow_empty_lyrics=bool(
+                                                 overlay and overlay["removed_supplied_indices"]))
     if semantic_evidence:
         observations = replace(observations,
                                evidence=observations.evidence + tuple(semantic_evidence))
     if adjust_lyrics and overlay is not None:
         observations = replace(observations, evidence=observations.evidence + (Evidence(
             "audio-lyric-adjustment", "soramimic_score.lyrics", "lyric-adjustment", 0.0,
-            {"mode": "additive-audio-completion", "supplied_lines": list(lyrics),
+            {"mode": "conservative-audio-adjustment", "supplied_lines": list(lyrics),
              "decisions": [{"operation": g["operation"],
                             "supplied_line_indices": g["supplied_indices"],
                             "recognized_line_indices": g["asr_indices"]}
-                           for g in overlay["groups"]]},
+                           for g in overlay["groups"]] + [
+                               {"operation": "remove", "supplied_line_indices": g["supplied_indices"],
+                                "recognized_line_indices": g["asr_indices"],
+                                "start_sec": g["start_sec"], "end_sec": g["end_sec"],
+                                "reason": g["reason"], "support": g["support"],
+                                "vocal_activity_measurement": g["vocal_activity_measurement"]}
+                               for g in overlay["removed_groups"]]},
         ),))
     line_windows = (
         {f"u{index}": (line.start_sec, line.end_sec)
@@ -1229,7 +1241,7 @@ def analyze_audio(
     if overlay is not None:
         line_windows = {f"u{i}": (g["start_sec"], g["end_sec"])
                         for i, g in enumerate(overlay["groups"])}
-    if line_windows is not None and len(line_windows) == len(lines) and not unobserved_lines:
+    if line_windows and len(line_windows) == len(lines) and not unobserved_lines:
         snapped = snap_line_windows_to_rests(
             tuple(line_windows[f"u{index}"] for index in range(len(lines))), notes,
         )

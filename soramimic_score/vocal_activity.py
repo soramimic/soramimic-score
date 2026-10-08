@@ -1,4 +1,4 @@
-"""Song-relative vocal-stem evidence for unresolved automatic lyrics."""
+"""Vocal-stem support and fully measured silence for lyric decisions."""
 
 from __future__ import annotations
 
@@ -13,6 +13,9 @@ class VocalActivity:
     relative_db: float
     active_frame_ratio: float
     supported: bool
+    # Unlike the song-relative support gate, this confirms every sampled frame
+    # is below the absolute -70 dBFS floor. None means incomplete/unknown coverage.
+    silence_confirmed: bool | None = None
 
 
 def measure_vocal_activity(vocals_path: Path,
@@ -44,7 +47,10 @@ def measure_vocal_activity(vocals_path: Path,
         end = max(start, min(len(samples), round(end_sec * sample_rate)))
         levels = frame_dbfs(samples[start:end])
         percentile = float(np.percentile(levels, 90)) if len(levels) else -240.
+        covered = bool(len(levels) and 0 <= start_sec < end_sec
+                       <= (len(samples) + 1) / sample_rate)
         evidence.append(VocalActivity(percentile, percentile - reference,
                                       float(np.mean(levels >= floor)) if len(levels) else 0.,
-                                      percentile >= floor))
+                                      percentile >= floor,
+                                      bool(np.all(levels < -70.)) if covered else None))
     return tuple(evidence)

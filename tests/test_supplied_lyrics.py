@@ -1,11 +1,13 @@
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from soramimic_score import (AlignedMora, AudioAdapters, LyricLine, MelodyNote,
                              ReadingSelection, analyze_audio, lyric_surface)
 from soramimic_score.japanese import kana_to_moras
-from soramimic_score.supplied_lyrics import plan_supplied_lyrics, locate_supplied_groups
+from soramimic_score.supplied_lyrics import (plan_supplied_lyrics, locate_supplied_groups,
+                                            prepare_supplied_audio)
 from soramimic_score.vocal_activity import VocalActivity
 
 
@@ -78,7 +80,7 @@ class SuppliedLyricsTests(unittest.TestCase):
 
     def test_only_joint_absence_of_support_leaves_input_unobserved(self):
         def silent(_path, windows):
-            return tuple(VocalActivity(-100, -90, 0, False) for _ in windows)
+            return tuple(VocalActivity(-100, -90, 0, False, silence_confirmed=True) for _ in windows)
         result = analyze_audio(self.path, self.adapters(
             (LyricLine("カキ", 0, 2),), (MelodyNote(0, 2, 60),), vocal=silent),
             lyrics=["カキ", "サシ"])
@@ -95,11 +97,12 @@ class SuppliedLyricsTests(unittest.TestCase):
             with self.subTest(source=source):
                 self.aligned_text.clear()
                 def activity(_path, windows):
-                    return tuple(VocalActivity(-20, 0, 1, source == "vocal") for _ in windows)
+                    return tuple(VocalActivity(-20, 0, 1, True) if source == "vocal"
+                                 else VocalActivity(-100, -90, 0, False, silence_confirmed=True) for _ in windows)
                 notes = (MelodyNote(0, 6, 60),) if source == "melody" else ()
                 heard = (LyricLine("ウア", 0, 6),) if source == "recognition" else ()
                 result = analyze_audio(self.path, self.adapters(heard, notes, vocal=activity),
-                                       lyrics=["カキ"])
+                                       lyrics=["カキ"], adjust_lyrics=True)
                 self.assertEqual(result.score.canonical_text, "カキ")
                 self.assertEqual(self.aligned_text, ["カキ"])
                 self.assertEqual(lyric_surface(result)["unobserved_supplied_indices"], [])
@@ -129,12 +132,105 @@ class SuppliedLyricsTests(unittest.TestCase):
     def test_unsupported_addition_does_not_change_supplied_text(self):
         heard = (LyricLine("カキ", 0, 1), LyricLine("サシ", 1, 2), LyricLine("タチ", 2, 3))
         def activity(_path, windows):
-            return tuple(VocalActivity(-100, -90, 0, False) for _ in windows)
+            return tuple(VocalActivity(-100, -90, 0, False, silence_confirmed=True) for _ in windows)
         result = analyze_audio(self.path, self.adapters(
             heard, (MelodyNote(0, 1, 60), MelodyNote(2, 3, 62)), vocal=activity),
             lyrics=["カキ", "タチ"], adjust_lyrics=True)
         self.assertEqual(result.score.canonical_text, "カキ\nタチ")
         self.assertEqual(len(lyric_surface(result)["rejected_additions"]), 1)
+
+    def test_removal_is_opt_in_and_audits_missing_intro_middle_and_ending(self):
+        supplied = ["アア", "カキ", "サシ", "タチ", "ナニ"]
+        heard = (LyricLine("カキ", 1, 2), LyricLine("タチ", 4, 5))
+        def silent(_path, windows):
+            return tuple(VocalActivity(-100, -90, 0, False, silence_confirmed=True) for _ in windows)
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                self.aligned_text.clear()
+                result = analyze_audio(self.path, self.adapters(
+                    heard, (MelodyNote(1, 2, 60), MelodyNote(4, 5, 62)), vocal=silent),
+                    lyrics=supplied, adjust_lyrics=enabled)
+                expected = ["カキ", "タチ"] if enabled else supplied
+                self.assertEqual(result.score.canonical_text, "\n".join(expected))
+                self.assertEqual(self.aligned_text, ["カキ", "タチ"])
+                overlay = lyric_surface(result)
+                self.assertEqual(overlay["supplied_lines"], supplied)
+                self.assertEqual(overlay["removed_supplied_indices"], [0, 2, 4] if enabled else [])
+                if enabled:
+                    audit = next(e.detail for e in result.observations.evidence
+                                 if e.kind == "lyric-adjustment")
+                    removals = [d for d in audit["decisions"] if d["operation"] == "remove"]
+                    self.assertEqual([(d["start_sec"], d["end_sec"]) for d in removals],
+                                     [(0, 1), (2, 4), (5, 6)])
+                    self.assertTrue(all(d["support"] == {
+                        "melody": False, "recognition": False, "vocal_activity": False,
+                    } and d["vocal_activity_measurement"]["active_frame_ratio"] == 0
+                        for d in removals))
+                    self.assertEqual([g["utterance_ids"] for g in overlay["groups"]],
+                                     [["u0"], ["u1"]])
+
+    def test_brief_vocal_activity_prevents_removal_even_below_percentile_gate(self):
+        def brief(_path, windows):
+            return tuple(VocalActivity(-70, -45, .01, False) for _ in windows)
+        result = analyze_audio(self.path, self.adapters((), vocal=brief),
+                               lyrics=["カキ"], adjust_lyrics=True)
+        self.assertEqual(result.score.canonical_text, "カキ")
+        self.assertEqual(self.aligned_text, ["カキ"])
+        self.assertEqual(lyric_surface(result)["removed_supplied_indices"], [])
+
+    def test_unmeasured_sources_cannot_authorize_removal(self):
+        def silent(_path, windows):
+            return tuple(VocalActivity(-100, -90, 0, False, silence_confirmed=True) for _ in windows)
+        heard = (LyricLine("カキ", 0, 1), LyricLine("タチ", 5, 6))
+        base = self.adapters(heard, vocal=silent)
+        for adapter_name in ("vocal_activity", "lyric_recognizer", "audio_duration"):
+            with self.subTest(adapter=adapter_name):
+                result = analyze_audio(self.path, replace(base, **{adapter_name: None}),
+                                       lyrics=["カキ", "サシ", "タチ"], adjust_lyrics=True)
+                self.assertEqual(result.score.canonical_text, "カキ\nサシ\nタチ")
+                self.assertEqual(lyric_surface(result)["removed_supplied_indices"], [])
+
+    def test_non_silent_or_unmeasured_vocals_cannot_authorize_removal(self):
+        for covered in (False, None):
+            with self.subTest(covered=covered):
+                def incomplete(_path, windows):
+                    return tuple(VocalActivity(-100, -90, 0, False, silence_confirmed=covered)
+                                 for _ in windows)
+                result = analyze_audio(self.path, self.adapters((), vocal=incomplete),
+                                       lyrics=["カキ"], adjust_lyrics=True)
+                self.assertEqual(result.score.canonical_text, "カキ")
+                self.assertEqual(lyric_surface(result)["removed_supplied_indices"], [])
+
+    def test_discarded_recognition_still_prevents_claiming_absence(self):
+        def silent(_path, windows):
+            return tuple(VocalActivity(-100, -90, 0, False, silence_confirmed=True) for _ in windows)
+        raw = (LyricLine("ウア", 0, 6),)
+        lines, plan, unobserved = prepare_supplied_audio(
+            self.path, ["カキ"], (), (), self.adapters(raw, vocal=silent),
+            adjust_lyrics=True, recognition_evidence=raw,
+        )
+        self.assertEqual([line.text for line in lines], ["カキ"])
+        self.assertEqual(plan["removed_supplied_indices"], [])
+        self.assertEqual(unobserved, ())
+
+    def test_unresolved_empty_window_is_not_absence_evidence(self):
+        result = analyze_audio(self.path, self.adapters((), duration=0., vocal=lambda *_: ()),
+                               lyrics=["カキ"], adjust_lyrics=True)
+        self.assertEqual(result.score.canonical_text, "カキ")
+        self.assertEqual(lyric_surface(result)["removed_supplied_indices"], [])
+        self.assertEqual(lyric_surface(result)["groups"][0]["alignment_status"], "window-unresolved")
+
+    def test_removing_all_silent_input_returns_an_empty_score_with_original_evidence(self):
+        def silent(_path, windows):
+            return tuple(VocalActivity(-100, -90, 0, False, silence_confirmed=True) for _ in windows)
+        result = analyze_audio(self.path, self.adapters((), vocal=silent),
+                               lyrics=["カキ", "サシ"], adjust_lyrics=True)
+        self.assertEqual(result.score.canonical_text, "")
+        self.assertEqual(result.score.synthesis_plan, ())
+        self.assertEqual(self.aligned_text, [])
+        restored = type(result).from_json(result.to_json())
+        self.assertEqual(lyric_surface(restored)["supplied_lines"], ["カキ", "サシ"])
+        self.assertEqual(lyric_surface(restored)["removed_supplied_indices"], [0, 1])
 
 
 if __name__ == "__main__":
