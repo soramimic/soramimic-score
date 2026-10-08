@@ -58,7 +58,7 @@ def analyze_main(argv) -> int:
                         help="RomajiASR ONNXモデル。歌詞の反復と欠損を発音認識で補う")
     parser.add_argument("--lyrics", type=Path, help="UTF-8歌詞ファイル（1行1フレーズ）")
     parser.add_argument("--adjust-lyrics", action="store_true",
-                        help="音源の認識結果に合わせ、入力歌詞を行単位で削除・補完する")
+                        help="入力歌詞を保持し、音源から不足する行だけを追加する")
     args = parser.parse_args(argv)
     if args.adjust_lyrics and args.lyrics is None:
         parser.error("--adjust-lyrics には --lyrics が必要です")

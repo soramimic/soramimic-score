@@ -49,6 +49,19 @@ class JapaneseReadingTests(unittest.TestCase):
 
 
 class KnownLyricsAlignmentTests(unittest.TestCase):
+    def test_explicit_observation_owner_does_not_fill_silent_repeated_input(self):
+        evidence = Evidence("e0", "synthetic-ctc", "alignment", .9)
+        boundary = lambda t: Boundary(t, .9, ("e0",))
+        observation = ObservedSingingUnit(("カ",), boundary(2), boundary(2.01),
+                                          boundary(2.2), .9, ("e0",))
+        spans = (LyricSpan("か", (0, 1), (ReadingCandidate("カ", "test", 1),)),
+                 LyricSpan("か", (2, 3), (ReadingCandidate("カ", "test", 1),)))
+        result = build_known_lyrics_document("か\nか", spans, (observation,), (evidence,),
+                                             observation_span_indices=(1,))
+        self.assertEqual([u.status for u in result.singing_units], ["unobserved", "observed"])
+        self.assertIsNone(result.singing_units[0].consonant_start)
+        self.assertEqual(result.singing_units[1].consonant_start.time_sec, 2)
+
     def _fixture_document(self):
         raw = json.loads(FIXTURE.read_text(encoding="utf-8"))
 

@@ -123,6 +123,8 @@ class AudioAdapters:
     phonetic_repetition_recognizer: Callable[[Path, Sequence[tuple[float, float]]], Sequence[object]] | None = None
     acoustic_repetition_recognizer: Callable[[Path, Sequence[object], Sequence[MelodyNote]], Sequence[object]] | None = None
     melody_recoverer: Callable[[Path, float, float], Sequence[MelodyNote]] | None = None
+    audio_duration: Callable[[Path], float] | None = None
+    dictionary_reading_selector: ReadingSelector | None = None
 
 
 class AudioPipelineError(RuntimeError):
@@ -206,14 +208,22 @@ def _validate_readings(
 
 def _validate_moras(
     readings: Sequence[ReadingSelection], aligned: Sequence[AlignedMora],
+    *, unobserved_line_indices: Sequence[int] = (),
 ) -> tuple[AlignedMora, ...]:
     result = tuple(aligned)
+    unobserved = set(unobserved_line_indices)
+    if any(type(index) is not int or not 0 <= index < len(readings) for index in unobserved):
+        raise AudioPipelineError("mora alignment", "invalid unobserved lyric line")
     if tuple((item.line_index, item.mora_index) for item in result) != tuple(sorted(
         (item.line_index, item.mora_index) for item in result
     )):
         raise AudioPipelineError("mora alignment", "moras must be in lyric order")
     for line_index, reading in enumerate(readings):
         items = tuple(item for item in result if item.line_index == line_index)
+        if line_index in unobserved:
+            if items:
+                raise AudioPipelineError("mora alignment", "unobserved line has acoustic moras")
+            continue
         if tuple(item.mora_index for item in items) != tuple(range(len(items))):
             raise AudioPipelineError("mora alignment", "mora indices must be contiguous")
         if "".join(item.kana for item in items) != "".join(kana_to_moras(reading.kana)):
@@ -264,12 +274,13 @@ def build_audio_observations(
     readings: Sequence[ReadingSelection],
     aligned_moras: Sequence[AlignedMora],
     melody_notes: Sequence[MelodyNote],
-    *, allow_empty_melody: bool = False,
+    *, allow_empty_melody: bool = False, unobserved_line_indices: Sequence[int] = (),
 ) -> IntermediateRepresentation:
     """Normalize adapter results into the versioned observation document."""
     lines = _validate_lines(lines, timed=False)
     readings = _validate_readings(lines, readings)
-    aligned_moras = _validate_moras(readings, aligned_moras)
+    aligned_moras = _validate_moras(readings, aligned_moras,
+                                   unobserved_line_indices=unobserved_line_indices)
     melody_notes = _validate_notes(melody_notes, allow_empty=allow_empty_melody)
 
     canonical_text = "\n".join(line.text for line in lines)
@@ -330,6 +341,7 @@ def build_audio_observations(
 
     document = build_known_lyrics_document(
         canonical_text, tuple(spans), tuple(observations), tuple(evidence),
+        observation_span_indices=tuple(item.line_index for item in aligned_moras),
     )
     note_evidence: list[Evidence] = []
     candidates: list[NoteCandidate] = []
@@ -369,15 +381,14 @@ def analyze_audio(
     on_progress: Callable[[str], None] | None = None,
     accompaniment_path: Path | None = None,
 ) -> ScoreDocument:
-    """Locate lyrics with ASR, fix pronunciation, then align the final reading.
+    """Keep supplied lyrics, locate them acoustically, then align their reading.
 
-    Matched supplied text is authoritative for reading selection. Recognition
-    locates its interval; it is not an alternative pronunciation. Unmatched
-    recognition and unused supplied lines remain explicitly recorded. Optional
-    whole-line deletion/completion requires ``adjust_lyrics=True``.
+    Supplied text is authoritative even when recognition disagrees. Recognition
+    supplies interval hints; neighboring anchors bound unresolved input. Optional
+    whole-line additions require ``adjust_lyrics=True`` and never delete input.
     """
     from .japanese import strip_ruby
-    from .surface import SurfaceLine, attach_lyric_surface, plan_lyric_inputs
+    from .surface import attach_lyric_surface
 
     path = Path(audio_path)
     if not path.is_file():
@@ -411,22 +422,23 @@ def analyze_audio(
     reading_selector = (adapters.automatic_reading_selector
                         if lyrics is None and adapters.automatic_reading_selector is not None
                         else adapters.reading_selector)
-    if adapters.lyric_recognizer is None:
+    if adapters.lyric_recognizer is None and lyrics is None:
         raise AudioPipelineError("lyrics", "ASR-first analysis requires a recognizer")
     if on_progress:
         on_progress("歌詞を認識しています")
     def validate_recognized(current):
-        if not current and lyrics is None and adapters.phonetic_recognizer is not None:
+        if not current and (lyrics is not None or adapters.phonetic_recognizer is not None):
             return ()
         return _validate_lines(current, timed=True)
 
     raw_recognized = validate_recognized(tuple(
-        _run_adapter("lyrics", adapters.lyric_recognizer, path)))
+        _run_adapter("lyrics", adapters.lyric_recognizer, path))
+        if adapters.lyric_recognizer is not None else ())
     if on_progress:
         on_progress("音符と音高を推定しています")
-    allow_spoken = lyrics is None and adapters.vocal_activity is not None
+    allow_spoken = adapters.vocal_activity is not None
     notes = _validate_notes(_run_adapter("melody", adapters.melody_transcriber, path),
-                            allow_empty=allow_spoken)
+                            allow_empty=allow_spoken or lyrics is not None)
     recognized_lines = []
     semantic_evidence = []
     credit_recovered: set[LyricLine] = set()
@@ -745,40 +757,35 @@ def analyze_audio(
         retained = tuple(item for index, line in enumerate(recognized)
                          for item in replacements.get(index, (line,)))
         recognized = validate_recognized(retained)
-    adjustment, overlay = None, None
+    overlay = None
+    unobserved_lines = ()
     lines = recognized
     if lyrics is not None:
-        if adjust_lyrics:
-            from .lyrics import adjust_known_lyrics
-            adjustment = adjust_known_lyrics(lyrics, recognized, reading=adapters.lyric_reading)
-            lines = adjustment.lines
-        else:
-            convert = adapters.lyric_reading or (lambda _: "")
-            overlay = plan_lyric_inputs(
-                [SurfaceLine(strip_ruby(line.text), convert(line.text)) for line in recognized],
-                [SurfaceLine(strip_ruby(text), convert(text)) for text in lyrics],
-            )
-            overlay["supplied_lines"] = list(lyrics)
-            prepared = []
-            for index, group in enumerate(overlay["groups"]):
-                sources = [recognized[i] for i in group["asr_indices"]]
-                text = ("\n".join(lyrics[i] for i in group["supplied_indices"])
-                        if group["operation"] == "match" else sources[0].text)
-                prepared.append(LyricLine(text, sources[0].start_sec, sources[-1].end_sec))
-                group.update(utterance_ids=[f"u{index}"], start_sec=sources[0].start_sec,
-                             end_sec=sources[-1].end_sec)
-            lines = _validate_lines(prepared, timed=True)
+        from .supplied_lyrics import prepare_supplied_audio
+        lines, overlay, unobserved_lines = prepare_supplied_audio(
+            path, lyrics, recognized, notes, adapters, add_missing=adjust_lyrics,
+        )
 
     # Only the final text reaches the selector. Its closed candidates contain
     # no pronunciation copied from a different recognized surface.
     if on_progress:
         on_progress("歌詞の読みを確認しています")
-    readings = _validate_readings(
-        lines, _run_adapter("readings", reading_selector, path, lines),
-    ) if lines else ()
+    active_indices = [i for i in range(len(lines)) if i not in unobserved_lines]
+    active_lines = tuple(lines[i] for i in active_indices)
+    active_readings = _validate_readings(active_lines, _run_adapter(
+        "readings", reading_selector, path, active_lines,
+    )) if active_lines else ()
+    selected = dict(zip(active_indices, active_readings, strict=True))
+    if unobserved_lines:
+        silent_lines = tuple(lines[i] for i in unobserved_lines)
+        defaults = _validate_readings(silent_lines, _run_adapter(
+            "readings", adapters.dictionary_reading_selector or reading_selector,
+            path, silent_lines,
+        ))
+        selected.update(zip(unobserved_lines, defaults, strict=True))
+    readings = tuple(selected[i] for i in range(len(lines)))
     if overlay is not None:
         for group, reading in zip(overlay["groups"], readings, strict=True):
-            group["original_acoustic_reading"] = group["acoustic_reading"]
             group["acoustic_reading"] = reading.kana
             group["reading_candidates"] = list(reading.candidates)
         overlay.pop("acoustic_changes", None)
@@ -817,7 +824,20 @@ def analyze_audio(
                         return (), (), ()
                     raise AudioPipelineError("lyrics", "no acoustically alignable lyric lines")
 
-    lines, readings, moras = align_retained(lines, readings)
+    if unobserved_lines:
+        _, _, active_moras = align_retained(
+            tuple(lines[i] for i in active_indices),
+            tuple(readings[i] for i in active_indices),
+        )
+        moras = tuple(replace(mora, line_index=active_indices[mora.line_index])
+                      for mora in active_moras)
+        moras = _validate_moras(readings, moras, unobserved_line_indices=unobserved_lines)
+    else:
+        lines, readings, moras = align_retained(lines, readings)
+    if overlay is not None:
+        for i, group in enumerate(overlay["groups"]):
+            if i not in unobserved_lines:
+                group["alignment_status"] = "aligned"
     if lyrics is None:
         rejected = []
         for index, line in enumerate(lines):
@@ -1187,21 +1207,29 @@ def analyze_audio(
     if on_progress:
         on_progress("楽譜データを組み立てています")
     observations = build_audio_observations(lines, readings, moras, notes,
-                                             allow_empty_melody=allow_spoken)
+                                             allow_empty_melody=allow_spoken or lyrics is not None,
+                                             unobserved_line_indices=unobserved_lines)
     if semantic_evidence:
         observations = replace(observations,
                                evidence=observations.evidence + tuple(semantic_evidence))
-    if adjustment is not None:
+    if adjust_lyrics and overlay is not None:
         observations = replace(observations, evidence=observations.evidence + (Evidence(
             "audio-lyric-adjustment", "soramimic_score.lyrics", "lyric-adjustment", 0.0,
-            adjustment.detail,
+            {"mode": "additive-audio-completion", "supplied_lines": list(lyrics),
+             "decisions": [{"operation": g["operation"],
+                            "supplied_line_indices": g["supplied_indices"],
+                            "recognized_line_indices": g["asr_indices"]}
+                           for g in overlay["groups"]]},
         ),))
     line_windows = (
         {f"u{index}": (line.start_sec, line.end_sec)
          for index, line in enumerate(lines)
          if line.start_sec is not None and line.end_sec is not None} or None
     )
-    if line_windows is not None and len(line_windows) == len(lines):
+    if overlay is not None:
+        line_windows = {f"u{i}": (g["start_sec"], g["end_sec"])
+                        for i, g in enumerate(overlay["groups"])}
+    if line_windows is not None and len(line_windows) == len(lines) and not unobserved_lines:
         snapped = snap_line_windows_to_rests(
             tuple(line_windows[f"u{index}"] for index in range(len(lines))), notes,
         )

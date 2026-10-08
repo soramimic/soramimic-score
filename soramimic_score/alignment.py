@@ -134,12 +134,22 @@ def _role(symbol: str) -> str:
 
 def build_known_lyrics_document(canonical_text: str, spans: Sequence[LyricSpan],
                                 observations: Sequence[ObservedSingingUnit] = (),
-                                evidence: Sequence[Evidence] = ()) -> IntermediateRepresentation:
+                                evidence: Sequence[Evidence] = (), *,
+                                observation_span_indices: Sequence[int] | None = None,
+                                ) -> IntermediateRepresentation:
     """Build schema v1 without deleting canonical units absent from the audio."""
     if tuple(span.surface_span for span in spans) != tuple(sorted(span.surface_span for span in spans)):
         raise ValueError("lyric spans must be in surface order")
     if any(left.surface_span[1] > right.surface_span[0] for left, right in zip(spans, spans[1:])):
         raise ValueError("lyric spans must not overlap")
+    if observation_span_indices is not None:
+        owners = tuple(observation_span_indices)
+        if (len(owners) != len(observations)
+                or any(type(i) is not int or not 0 <= i < len(spans) for i in owners)
+                or owners != tuple(sorted(owners))):
+            raise ValueError("observation owners must identify ordered lyric spans")
+        owned = [tuple(i for i, owner in enumerate(owners) if owner == index)
+                 for index in range(len(spans))]
     evidence_ids = {item.id for item in evidence}
     if len(evidence_ids) != len(evidence):
         raise ValueError("evidence IDs must be unique")
@@ -161,7 +171,10 @@ def build_known_lyrics_document(canonical_text: str, spans: Sequence[LyricSpan],
     selected_mora_ids: list[str] = []
     selected_mora_text: list[str] = []
     selected_reading_ranges: list[tuple[int, int]] = []
-    selected_candidates = _select_candidates(spans, observations)
+    selected_candidates = (_select_candidates(spans, observations)
+                           if observation_span_indices is None else tuple(
+                               _select_candidates((span,), tuple(observations[i] for i in indices))[0]
+                               for span, indices in zip(spans, owned, strict=True)))
 
     for utterance_index, span in enumerate(spans):
         if canonical_text[slice(*span.surface_span)] != span.surface:
@@ -187,7 +200,17 @@ def build_known_lyrics_document(canonical_text: str, spans: Sequence[LyricSpan],
                                     tuple(reading_ids), reading_ids[selected]))
         selected_reading_ranges.append((selected_start, len(selected_mora_ids)))
 
-    mapping = _align(selected_mora_text, observations)
+    if observation_span_indices is None:
+        mapping = _align(selected_mora_text, observations)
+    else:
+        # Audio adapters already identify the source line. Do not let a silent
+        # repeated line steal identical mora observations from its neighbor.
+        mapping = tuple(
+            indices[item] if item is not None else None
+            for (start, end), indices in zip(selected_reading_ranges, owned, strict=True)
+            for item in _align(selected_mora_text[start:end],
+                               tuple(observations[i] for i in indices))
+        )
     phonemes: list[Phoneme] = []
     nuclei: list[VowelNucleus] = []
     units: list[SingingUnit] = []

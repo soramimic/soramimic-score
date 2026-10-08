@@ -8,19 +8,19 @@ def transcript(*texts):
 
 
 class LyricAdjustmentTests(unittest.TestCase):
-    def test_omits_absent_whole_lines_and_retains_original_input(self):
+    def test_unrecognized_whole_lines_remain_in_original_order(self):
         original = ("赤い花", "青い空", "白い雲")
         result = adjust_known_lyrics(original, transcript("青い空"))
-        self.assertEqual([line.text for line in result.lines], ["青い空"])
+        self.assertEqual([line.text for line in result.lines], list(original))
         self.assertEqual(result.detail["supplied_lines"], list(original))
         self.assertEqual([row["supplied_line_indices"] for row in result.detail["decisions"]
-                          if row["operation"] == "remove"], [[0], [2]])
+                          if row["operation"] == "remove"], [])
 
     def test_repeats_whole_input_lines_and_adds_new_heard_line(self):
         result = adjust_known_lyrics(("青い空",), transcript("青い空", "青い空", "ラララ"))
         self.assertEqual([line.text for line in result.lines], ["青い空", "青い空", "ラララ"])
-        self.assertEqual([row["operation"] for row in result.detail["decisions"]],
-                         ["keep", "repeat", "add"])
+        self.assertCountEqual([row["operation"] for row in result.detail["decisions"]],
+                              ["keep", "repeat", "add"])
 
     def test_matching_pronunciation_preserves_input_spelling(self):
         reading = {"青い空": "アオイソラ", "あおいそら": "アオイソラ"}.__getitem__
@@ -29,10 +29,10 @@ class LyricAdjustmentTests(unittest.TestCase):
 
     def test_identical_input_lines_are_consumed_before_counting_repetitions(self):
         result = adjust_known_lyrics(("青い空", "青い空"), transcript("青い空", "青い空", "青い空"))
-        self.assertEqual([row["operation"] for row in result.detail["decisions"]],
-                         ["keep", "keep", "repeat"])
-        self.assertEqual([row["supplied_line_indices"] for row in result.detail["decisions"]],
-                         [[0], [1], [0]])
+        self.assertCountEqual([row["operation"] for row in result.detail["decisions"]],
+                              ["keep", "keep", "repeat"])
+        self.assertEqual([i for row in result.detail["decisions"]
+                          for i in row["supplied_line_indices"]], [0, 1])
 
     def test_split_recognition_does_not_split_input_line(self):
         result = adjust_known_lyrics(("青い空白い雲",), transcript("青い空", "白い雲"))
@@ -48,19 +48,20 @@ class LyricAdjustmentTests(unittest.TestCase):
         result = adjust_known_lyrics(("あおいそら",), transcript("あおそら"))
         self.assertEqual(result.lines[0].text, "あおいそら")
 
-    def test_join_cannot_smuggle_an_unheard_input_line(self):
+    def test_unrecognized_short_input_is_kept_without_fabricated_times(self):
         result = adjust_known_lyrics(("あいうえおかきくけこ", "ん"), transcript("あいうえおかきくけこ"))
-        self.assertEqual([line.text for line in result.lines], ["あいうえおかきくけこ"])
+        self.assertEqual([line.text for line in result.lines], ["あいうえおかきくけこ", "ん"])
+        self.assertIsNone(result.lines[-1].start_sec)
 
     def test_unrelated_audio_does_not_replace_all_input(self):
-        with self.assertRaisesRegex(ValueError, "No supplied lyric line"):
-            adjust_known_lyrics(("青い空",), transcript("ラララ"))
+        result = adjust_known_lyrics(("青い空",), transcript("ラララ"))
+        self.assertEqual([line.text for line in result.lines], ["青い空"])
 
-    def test_invalid_or_empty_transcript_fails(self):
+    def test_invalid_transcript_fails_but_empty_recognition_preserves_input(self):
         with self.assertRaises(ValueError):
             adjust_known_lyrics("青い空", transcript("青い空"))
-        with self.assertRaises(RuntimeError):
-            adjust_known_lyrics(("青い空",), ())
+        result = adjust_known_lyrics(("青い空",), ())
+        self.assertEqual([line.text for line in result.lines], ["青い空"])
         with self.assertRaises(RuntimeError):
             adjust_known_lyrics(("青い空",), (LyricLine("青い空"),))
 

@@ -465,6 +465,11 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
         automatic_selector = lambda path, lines: select_readings(path, lines, automatic=True)
     else:
         automatic_selector = lambda path, lines: dictionary_readings(path, lines, automatic=True)
+
+    def audio_duration(path):
+        import librosa
+        return float(librosa.get_duration(path=str(path)))
+
     return AudioAdapters(select_readings if config.acoustic_readings else dictionary_readings,
                          align, melody, recognize, lyric_reading, recover_window,
                          repeat_evidence, vocal_activity if vocals_path is not None else None,
@@ -475,4 +480,5 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
                          acoustic_repetition_recognizer
                          if config.romaji_model is not None and vocals_path is not None else None,
                          melody_recoverer
-                         if config.romaji_model is not None and vocals_path is not None else None)
+                         if config.romaji_model is not None and vocals_path is not None else None,
+                         audio_duration, dictionary_readings)
