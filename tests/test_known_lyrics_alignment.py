@@ -14,6 +14,18 @@ FIXTURE = Path(__file__).parent / "fixtures" / "known_lyrics_unobserved.json"
 
 
 class JapaneseReadingTests(unittest.TestCase):
+    def test_isolated_small_kana_have_full_size_phonemes(self):
+        for small, full in zip("ァィゥェォャュョヮヵヶ", "アイウエオヤユヨワカケ", strict=True):
+            with self.subTest(kana=small):
+                self.assertEqual(phonemes_for_mora(small), phonemes_for_mora(full))
+                self.assertEqual(mora_distance(small, full), 0)
+        self.assertEqual(phonemes_for_mora("ぁ"), ("a",))
+        self.assertEqual(kana_to_moras("ンァ"), ("ン", "ァ"))
+        self.assertEqual(phonemes_for_mora("ファ"), ("f", "a"))
+        self.assertEqual(phonemes_for_mora("キャ"), ("ky", "a"))
+        with self.assertRaises(ValueError):
+            phonemes_for_mora("★")
+
     def test_long_vowel_contracted_nasal_and_sokuon_are_distinct_moras(self):
         self.assertEqual(kana_to_moras("カーキャンッ"), ("カ", "ー", "キャ", "ン", "ッ"))
         self.assertEqual(phonemes_for_mora("ー", "a"), ("a",))
@@ -49,6 +61,17 @@ class JapaneseReadingTests(unittest.TestCase):
 
 
 class KnownLyricsAlignmentTests(unittest.TestCase):
+    def test_isolated_small_kana_keep_original_reading_and_long_vowel(self):
+        span = LyricSpan("声", (0, 1), (
+            ReadingCandidate("ァー", "synthetic", 1),
+            ReadingCandidate("アー", "alternative", .5),
+        ))
+        document = build_known_lyrics_document("声", (span,))
+        self.assertEqual([r.kana for r in document.readings], ["ァー", "アー"])
+        self.assertEqual([m.text for m in document.moras], ["ァ", "ー", "ア", "ー"])
+        self.assertEqual([p.symbol for p in document.phonemes], ["a", "a", "a", "a"])
+        self.assertTrue(all(m.phoneme_ids for m in document.moras))
+
     def test_explicit_observation_owner_does_not_fill_silent_repeated_input(self):
         evidence = Evidence("e0", "synthetic-ctc", "alignment", .9)
         boundary = lambda t: Boundary(t, .9, ("e0",))
