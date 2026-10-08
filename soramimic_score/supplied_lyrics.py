@@ -136,7 +136,8 @@ def locate_supplied_groups(plan, recognized, duration):
     return groups
 
 
-def prepare_supplied_audio(path, supplied, recognized, notes, adapters, *, add_missing):
+def prepare_supplied_audio(path, supplied, recognized, notes, adapters, *, adjust_lyrics,
+                           recognition_evidence):
     """Prepare authoritative text and measure whether unresolved windows have support."""
     from .audio import AudioPipelineError, LyricLine, _run_adapter
 
@@ -146,7 +147,7 @@ def prepare_supplied_audio(path, supplied, recognized, notes, adapters, *, add_m
     if not math.isfinite(duration) or duration < 0:
         raise AudioPipelineError("lyrics", "recording duration must be finite and nonnegative")
     plan = plan_supplied_lyrics(supplied, recognized, reading=adapters.lyric_reading,
-                                add_missing=add_missing)
+                                add_missing=adjust_lyrics)
     groups = locate_supplied_groups(plan, recognized, duration)
     windows = [(g["start_sec"], g["end_sec"]) for g in groups
                if g["end_sec"] > g["start_sec"]]
@@ -156,21 +157,53 @@ def prepare_supplied_audio(path, supplied, recognized, notes, adapters, *, add_m
         raise AudioPipelineError("vocal activity", "one result is required per lyric window")
     by_window = dict(zip(windows, activity, strict=True)) if activity is not None else {}
     retained = []
+    removed = []
     unobserved = []
     lines = []
     for group in groups:
         start, end = group["start_sec"], group["end_sec"]
         pitched = any(n.start_sec < end and n.end_sec > start for n in notes)
         voiced = by_window.get((start, end))
-        recognized_support = bool(group["asr_indices"])
+        # Filtered or mismatched recognition still prevents claiming that no
+        # voice was heard. A missing adapter means unknown, not an empty result.
+        recognized_support = bool(group["asr_indices"]) or (
+            any(line.start_sec < end and line.end_sec > start for line in recognition_evidence)
+            if recognition_evidence is not None else None)
+        measured_activity = (voiced is not None
+                             and all(math.isfinite(value) for value in (
+                                 voiced.percentile_dbfs, voiced.relative_db,
+                                 voiced.active_frame_ratio))
+                             and 0 <= voiced.active_frame_ratio <= 1
+                             and type(voiced.supported) is bool)
+        # A short utterance can fall below the percentile gate while some
+        # frames are still active. Any such frame is evidence to retain input.
+        vocal_support = None
+        if measured_activity:
+            if (voiced.supported or voiced.active_frame_ratio > 0
+                    or voiced.silence_confirmed is False):
+                vocal_support = True
+            elif voiced.silence_confirmed is True:
+                vocal_support = False
         group["support"] = {"melody": pitched, "recognition": recognized_support,
-                            "vocal_activity": voiced.supported if voiced is not None else None}
+                            "vocal_activity": vocal_support}
+        if measured_activity:
+            group["vocal_activity_measurement"] = asdict(voiced)
         if (group["operation"] in {"add", "repeat"} and not pitched
                 and voiced is not None and not voiced.supported):
             plan.setdefault("rejected_additions", []).append(group)
             continue
-        missing = (end <= start or not pitched and not recognized_support
-                   and voiced is not None and not voiced.supported)
+        no_evidence = (not pitched and recognized_support is False and vocal_support is False)
+        # Removal needs a real, fully measured interval inside the recording.
+        # Unresolved/touching windows and an inferred recording end cannot prove
+        # absence. Preserve the original input and the complete removal audit.
+        if (adjust_lyrics and group["supplied_indices"] and no_evidence
+                and adapters.audio_duration is not None and 0 <= start < end <= duration):
+            removed.append(group | {
+                "operation": "remove", "reason": "no-performance-evidence",
+                "alignment_status": "not-aligned", "line_indices": [], "utterance_ids": [],
+            })
+            continue
+        missing = end <= start or no_evidence
         index = len(lines)
         group.update(line_indices=[index], utterance_ids=[f"u{index}"])
         if missing:
@@ -183,7 +216,10 @@ def prepare_supplied_audio(path, supplied, recognized, notes, adapters, *, add_m
         lines.append(LyricLine(group["display_text"],
                                None if missing else start, None if missing else end))
         retained.append(group)
-    plan.update(groups=retained, display_text="\n".join(line.text for line in lines),
+    removed_indices = [i for group in removed for i in group["supplied_indices"]]
+    plan.update(groups=retained, removed_groups=removed, removed_supplied_indices=removed_indices,
+                unused_supplied_indices=removed_indices,
+                display_text="\n".join(line.text for line in lines),
                 unobserved_supplied_indices=[i for index in unobserved
                                              for i in retained[index]["supplied_indices"]],
                 recording_duration_sec=duration)

@@ -165,7 +165,24 @@ class SpokenTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "silence.wav"
             sf.write(path, np.zeros(16000), 16000)
-            self.assertFalse(measure_vocal_activity(path, ((0, 1),))[0].supported)
+            measured = measure_vocal_activity(path, ((0, 1), (0, 1.2), (1.1, 1.2), (-.1, .2)))
+            self.assertFalse(measured[0].supported)
+            self.assertTrue(measured[0].silence_confirmed)
+            self.assertTrue(all(item.silence_confirmed is None for item in measured[1:]))
+
+    @unittest.skipUnless(importlib.util.find_spec("soundfile"), "audio dependencies unavailable")
+    def test_quiet_voice_is_not_confirmed_silence_even_below_relative_gate(self):
+        import numpy as np
+        import soundfile as sf
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "quiet.wav"
+            t = np.arange(32000) / 16000
+            wave = np.where(t < 1, .2, .001) * np.sin(2 * np.pi * 220 * t)
+            sf.write(path, wave, 16000)
+            result = measure_vocal_activity(path, ((1, 2),))[0]
+            self.assertFalse(result.supported)
+            self.assertEqual(result.active_frame_ratio, 0)
+            self.assertFalse(result.silence_confirmed)
 
     @unittest.skipUnless(importlib.util.find_spec("soundfile"), "audio dependencies unavailable")
     def test_short_voice_before_a_long_rest_is_kept_without_stretching(self):
