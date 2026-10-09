@@ -16,10 +16,6 @@ from .japanese import _RUBY, kana_to_moras, katakana, mora_vowel
 
 _YOMI_LOCK = Lock()
 _LATIN_OR_DIGIT = re.compile(r"[0-9０-９A-Za-zＡ-Ｚａ-ｚ]")
-_SPOKEN_SYMBOL = re.compile(r"[&+#%@=×÷＆＋＃％＠＝]")
-_SYMBOL_READING = {"&": "アンド", "+": "プラス", "#": "シャープ",
-                   "%": "パーセント", "@": "アット", "=": "イコール",
-                   "×": "カケル", "÷": "ワル"}
 
 
 def _vowels(reading):
@@ -67,31 +63,6 @@ def _automatic_candidates(text, candidates):
     for candidate in linguistic[1:]:
         if _vowels(candidate[0]) != default_vowels:
             selected.append(candidate)
-    symbols = list(_SPOKEN_SYMBOL.finditer(text))
-    def plain_reading(surface):
-        if not surface:
-            return ""
-        try:
-            return dictionary_readings(None, (LyricLine(surface),))[0].kana
-        except ValueError:
-            return ""
-
-    for subset in ([{index} for index in range(len(symbols))]
-                   + ([set(range(len(symbols)))] if len(symbols) > 1 else [])):
-        pieces = []
-        cursor = 0
-        for index, match in enumerate(symbols):
-            if match.start() > cursor:
-                pieces.append(plain_reading(text[cursor:match.start()]))
-            surface = unicodedata.normalize("NFKC", match.group())
-            pieces.append(_SYMBOL_READING.get(surface, "") if index in subset else
-                          plain_reading(match.group()))
-            cursor = match.end()
-        if cursor < len(text):
-            pieces.append(plain_reading(text[cursor:]))
-        alternate = "".join(pieces)
-        if alternate:
-            selected.append((alternate, "spoken-symbol"))
     unique = []
     seen = set()
     for candidate in selected:

@@ -57,9 +57,7 @@ class YomiReadingsTests(unittest.TestCase):
         selected, = dictionary_readings(None, (LyricLine("二人今夜に駆け出してく"),),
                                         automatic=True)
         self.assertIn("フタリイマヨルニカケダシテク", selected.candidates)
-        self.yomi.side_effect = lambda text, nbest: [Candidate({
-            "歌&愛": "ウタアイ", "歌": "ウタ", "愛": "アイ", "&": "",
-        }[text])]
+        self.yomi.return_value = [Candidate("ウタアイ"), Candidate("ウタアンドアイ", rank=1)]
         selected, = dictionary_readings(None, (LyricLine("歌&愛"),), automatic=True)
         self.assertIn("ウタアンドアイ", selected.candidates)
 
