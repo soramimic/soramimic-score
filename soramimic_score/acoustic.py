@@ -1,9 +1,10 @@
-"""Optional Demucs and KanaWhisper inference, loaded only when requested."""
+"""Optional Demucs and audio reading inference, loaded only when requested."""
 from __future__ import annotations
 
 import gc
 import logging
 from pathlib import Path
+import tempfile
 
 logger = logging.getLogger(__name__)
 DEMUCS_FILE = "955717e8-8726e21a.th"
@@ -117,3 +118,59 @@ def transcribe_kana_views(paths, windows, config):
     finally:
         del transcriber, model
         release_memory()
+
+
+def transcribe_whisper_views(paths, windows, config, *, shared=None):
+    """Recognize bounded symbol context, without lyric prompts or hints."""
+    import librosa
+    import numpy as np
+    import soundfile as sf
+
+    logger.info("音声から記号の読みを確認しています")
+    model = None
+    try:
+        if shared is None:
+            from faster_whisper import WhisperModel
+            model = WhisperModel(config.whisper_model, device=config.device,
+                                 compute_type="int8" if config.device == "cpu" else "float16",
+                                 local_files_only=config.local_files_only)
+        results = {}
+        for view, path in paths.items():
+            samples, rate = librosa.load(str(path), sr=16000, mono=True)
+            if not len(samples) or not np.isfinite(samples).all():
+                raise ValueError("Audio must contain finite samples")
+            texts = []
+            for start, end in windows:
+                if not 0 <= start < end <= len(samples) / rate + .01 or end - start > 24.01:
+                    raise ValueError("Whisper reading windows must be within the audio and <=24 seconds")
+                segment = samples[round(start * rate):round(end * rate)]
+                if not len(segment):
+                    raise ValueError("Empty Whisper reading window")
+                if shared is not None:
+                    with tempfile.TemporaryDirectory(prefix="soramimic-score-reading-") as directory:
+                        excerpt = Path(directory) / "window.wav"
+                        sf.write(excerpt, segment, rate, subtype="FLOAT")
+                        response = shared.run("whisper", excerpt, {
+                            "model_size": config.whisper_model, "device": "auto",
+                            "language": "ja", "vad_filter": False,
+                            "condition_on_previous_text": False, "temperature": 0.,
+                        })
+                    if (not isinstance(response, dict)
+                            or not isinstance(response.get("lines"), list)
+                            or response.get("requested_language") != "ja"
+                            or response.get("requested_temperature") != 0.
+                            or any(not isinstance(row, dict) or not isinstance(row.get("text"), str)
+                                   for row in response["lines"])):
+                        raise RuntimeError("shared Whisper reading response is invalid")
+                    text = "".join(row["text"] for row in response["lines"])
+                else:
+                    segments, _ = model.transcribe(segment, language="ja", vad_filter=False,
+                                                   condition_on_previous_text=False, temperature=0.)
+                    text = "".join(segment.text for segment in segments)
+                texts.append(text)
+            results[view] = tuple(texts)
+        return results
+    finally:
+        if model is not None:
+            del model
+            release_memory()

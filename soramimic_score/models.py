@@ -13,12 +13,14 @@ import tempfile
 from .audio import (AudioAdapters, AlignedMora, CTCWindowCapacityError,
                     LyricLine, MelodyNote)
 from .audio import _run_adapter
-from .acoustic import KANA_MODEL, release_memory as _release, separate_vocals, transcribe_kana_views
+from .acoustic import (KANA_MODEL, release_memory as _release, separate_vocals,
+                       transcribe_kana_views, transcribe_whisper_views)
 from .japanese import kana_to_moras, katakana
 from .parenthetical import (choose_reading, reading_options, resolved_text,
                             selection_detail)
 from .readings import (dictionary_readings, grouped_acoustic_windows,
                        select_acoustic_reading, token_reading_proposals)
+from .symbol_readings import symbol_slots, symbol_reading_proposals, refine_symbol_reading
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +132,19 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
                     shared=None) -> AudioAdapters:
     """Low-level model adapters; use prepared_adapters to manage separation."""
     config.validate()
+    recognition_cache = {}
+
+    def source_key(path):
+        try:
+            stat = path.stat()
+        except OSError:
+            return None
+        return (path.resolve(), stat.st_size, stat.st_mtime_ns)
+
+    def remember_recognition(path, lines):
+        result = tuple(lines)
+        recognition_cache.update(source=source_key(path), lines=result)
+        return result
 
     def recognize(path):
         logger.info("歌詞を認識しています")
@@ -149,7 +164,7 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
                 if str(item["text"]).strip() and end > start:
                     lines.append(LyricLine(str(item["text"]).strip(), start, end))
                     previous_end = end
-            return tuple(lines)
+            return remember_recognition(path, lines)
         from faster_whisper import WhisperModel
         model = WhisperModel(config.whisper_model, device=config.device,
                              compute_type="int8" if config.device == "cpu" else "float16",
@@ -165,7 +180,7 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
                 if segment.text.strip() and end > start:
                     lines.append(LyricLine(segment.text.strip(), start, end))
                     previous_end = end
-            return tuple(lines)
+            return remember_recognition(path, lines)
         finally:
             del model
             _release()
@@ -395,11 +410,13 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
 
         defaults = dictionary_readings(path, lines, automatic=automatic)
         candidates = tuple(reading.candidates for reading in defaults)
+        slots = tuple(symbol_slots(line.text, defaults[index].kana)
+                      for index, line in enumerate(lines))
         potential = (tuple(token_reading_proposals(line.text, candidates[index][0])
                            for index, line in enumerate(lines)) if automatic else
                      ((),) * len(lines))
         ambiguous = [index for index, row in enumerate(candidates)
-                     if len(row) > 1 or potential[index]
+                     if len(row) > 1 or potential[index] or slots[index]
                      or any(choice["status"] == "unresolved" for choice in decisions[index])]
         if not ambiguous:
             return finish(defaults)
@@ -437,22 +454,53 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
         if changed:
             defaults = dictionary_readings(path, lines, automatic=automatic)
             candidates = tuple(reading.candidates for reading in defaults)
+            slots = tuple(symbol_slots(line.text, defaults[index].kana)
+                          for index, line in enumerate(lines))
+        symbol_windows = sorted({i for index in ambiguous if slots[index]
+                                 for i in assignments[index]})
+        lexical = (transcribe_whisper_views(paths, [windows[i] for i in symbol_windows],
+                                            config, shared=shared) if symbol_windows else {})
+        lexical_indices = {original: local for local, original in enumerate(symbol_windows)}
         result = list(defaults)
         for index in ambiguous:
-            if len(candidates[index]) == 1 and not potential[index]:
+            if len(candidates[index]) == 1 and not potential[index] and not slots[index]:
                 continue
             views = {view: "".join(rows[i] for i in assignments[index])
                      for view, rows in transcripts.items()}
             proposals = (token_reading_proposals(
                 lines[index].text, candidates[index][0], tuple(views.values()))
                 if automatic and potential[index] else ())
-            choices = tuple(dict.fromkeys((*candidates[index], *proposals)))
+            symbol_proposals, symbol_evidence = symbol_reading_proposals(
+                defaults[index].kana, slots[index], views)
+            choices = tuple(dict.fromkeys((*candidates[index], *proposals, *symbol_proposals)))
             selection = select_acoustic_reading(choices, views)
+            if slots[index]:
+                whisper_views = {
+                    view: "".join(rows[lexical_indices[i]] for i in assignments[index])
+                    for view, rows in lexical.items()
+                }
+                if (recognition_cache.get("source") is not None
+                        and recognition_cache["source"] == source_key(path)):
+                    context = [line.text for line in recognition_cache["lines"]
+                               if any(line.start_sec < windows[i][1]
+                                      and line.end_sec > windows[i][0]
+                                      for i in assignments[index])]
+                    if context:
+                        whisper_views["mix:full-context"] = "".join(context)
+                selection = refine_symbol_reading(
+                    lines[index].text, selection, views, whisper_views,
+                    previous_reading=defaults[index - 1].kana if index else "",
+                    next_reading=defaults[index + 1].kana if index + 1 < len(defaults) else "",
+                )
             result[index] = replace(selection, detail={
                 **defaults[index].detail, **selection.detail,
                 "dictionary_proposals": list(proposals),
+                "symbol_spans": list(slots[index]),
+                "symbol_proposals": list(symbol_proposals),
+                "symbol_evidence": list(symbol_evidence),
                 "windows_sec": [list(windows[i]) for i in assignments[index]],
                 "model": config.kana_model,
+                "whisper_model": config.whisper_model if slots[index] else None,
                 "vocal_separator": "demucs-htdemucs" if vocals_path else None,
             })
         return finish(result)

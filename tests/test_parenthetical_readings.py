@@ -252,6 +252,25 @@ class ParentheticalModelTests(unittest.TestCase):
         self.assertEqual(decision['whisper']['reason'], 'kanji-reading-not-observed')
         json.dumps(result.detail, ensure_ascii=False, allow_nan=False)
 
+    def test_symbol_slots_are_recomputed_after_a_parenthesis_is_resolved(self):
+        adapters = create_adapters(self.config)
+        texts = []
+        def slots(text, _reading):
+            texts.append(text)
+            return ({'start': text.index('&')},)
+        with (patch('soramimic_score.models.symbol_slots', side_effect=slots),
+              patch('soramimic_score.models.symbol_reading_proposals', return_value=((), ())),
+              patch('soramimic_score.models.transcribe_whisper_views', return_value={'mix': ('',)}),
+              patch('soramimic_score.models.refine_symbol_reading',
+                    side_effect=lambda _text, selection, *_args, **_kwargs: selection) as refine,
+              patch('soramimic_score.models.transcribe_kana_views',
+                    return_value={'mix': ('サダメミライ',)})):
+            result, = adapters.supplied_reading_selector(
+                self.audio, (LyricLine('運命(さだめ) & 未来', 0., 1.),), ('運命と未来',))
+        self.assertEqual(texts[-1], '｜運命《サダメ》 & 未来')
+        refine.assert_called_once()
+        self.assertEqual(result.kana, 'サダメミライ')
+
     def test_complete_pipeline_keeps_reading_and_original_input_after_save(self):
         source = '運命(さだめ)だ'
         adapters = create_adapters(self.config)
