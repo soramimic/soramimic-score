@@ -239,7 +239,11 @@ def choose_reading(options: dict, transcripts: dict[str, str], *,
     by_action, by_sound = {}, {}
     for i, choice in enumerate(choices):
         action = (choice["mode"] == "literal", choice["start"], _key(choice["reading"]))
-        for table, key in ((by_action, action), (by_sound, keys[i])):
+        # Identical full readings can assign a repetition to different
+        # parentheses. Keep single and doubled performances distinct so that
+        # such a tie cannot independently remove both parenthetical occurrences.
+        sound = (choice["mode"] == "literal", keys[i])
+        for table, key in ((by_action, action), (by_sound, sound)):
             if key in table:
                 parents[root(i)] = root(table[key])
             table[key] = i

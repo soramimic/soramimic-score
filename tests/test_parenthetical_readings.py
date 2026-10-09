@@ -117,6 +117,14 @@ class ParentheticalCandidateTests(unittest.TestCase):
                      for o in options]
         self.assertEqual(resolved_text(text, options, decisions), '｜運命《サダメ》だ　｜未来《アス》へ')
 
+    def test_ambiguous_repetition_ownership_does_not_remove_both_parentheses(self):
+        text = '未来(みらい)未来(みらい)'
+        options = self.options(text)
+        decisions = [choose_reading(o, {'mix': 'ミライミライミライ',
+                                        'vocals': 'ミライミライミライ'}) for o in options]
+        self.assertTrue(all(d['status'] == 'unresolved' for d in decisions))
+        self.assertEqual(resolved_text(text, options, decisions), text)
+
     def test_pronounced_base_and_repeated_words_remain_real_candidates(self):
         for text, heard, expected in [('運命(さだめ)だ', 'ウンメーダ', '｜運命《ウンメー》だ'),
                                       ('誰だ(だれだ)', 'ダレダダレダ', '｜誰だ《ダレダ》(だれだ)')]:
