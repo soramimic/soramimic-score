@@ -853,6 +853,19 @@ def analyze_audio(
             median_score = statistics.median(scores) if scores else 0.0
             if median_score >= MIN_CTC_MEDIAN_SCORE:
                 continue
+            if has_melodic_support(line, notes):
+                semantic_evidence.append(Evidence(
+                    f"audio-ctc-note-supported-{index}", "soramimic_score.semantic",
+                    "lyric-alignment-warning", 0.0,
+                    {"source_segment_index": index, "surface": line.text,
+                     "template_family": family, "credit_recovery": line in credit_recovered,
+                     "ctc_median_score": median_score, "status": "retained",
+                     "reason": "melodic-support",
+                     "note_candidate_ids": [f"audio-note-{i}" for i, note in enumerate(notes)
+                                            if line.start_sec < note.end_sec
+                                            and line.end_sec > note.start_sec]},
+                ))
+                continue
             rejected.append(index)
             semantic_evidence.append(Evidence(
                 f"audio-ctc-template-{index}", "soramimic_score.semantic",
