@@ -8,6 +8,7 @@ import math
 from typing import TYPE_CHECKING, Any
 
 from .japanese import strip_ruby
+from .parenthetical import matching_forms
 from .surface import SurfaceLine, align_lyric_surface, normalize_surface
 
 if TYPE_CHECKING:
@@ -32,7 +33,11 @@ def plan_supplied_lyrics(
     ):
         raise ValueError("supplied lyrics must be a nonempty sequence of lines")
     convert = reading or (lambda _: "")
-    surfaces = [SurfaceLine(strip_ruby(text), convert(text)) for text in supplied]
+    surfaces = []
+    for text in supplied:
+        base, annotation = matching_forms(text)
+        surfaces.append(SurfaceLine(strip_ruby(base), convert(text),
+                                    convert(annotation) if annotation != text else None))
     sources = [SurfaceLine(strip_ruby(line.text), convert(line.text)) for line in recognized]
     matched = (align_lyric_surface(
         sources, surfaces, minimum_similarity=minimum_similarity,
