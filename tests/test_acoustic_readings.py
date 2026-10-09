@@ -171,6 +171,57 @@ class PreparedAudioTests(unittest.TestCase):
         self.assertEqual(result[0].source, "soramimic-yomi")
         transcribe.assert_not_called()
 
+    def test_single_candidate_with_symbol_still_uses_audio(self):
+        slot = {"start": 3, "end": 4, "surface": "🧭", "mapped": True,
+                "kana_start": 4, "kana_end": 4}
+        base, spoken = "アシタモキミトアルコウ", "アシタモステキキミトアルコウ"
+        with patch("soramimic_score.models.dictionary_readings", return_value=(
+                ReadingSelection(base, "soramimic-yomi", 1, (base,)),)), \
+             patch("soramimic_score.models.symbol_slots", return_value=(slot,)), \
+             patch("soramimic_score.models.refine_symbol_reading",
+                   side_effect=lambda _text, selected, *_args, **_kwargs: selected), \
+             patch.dict("sys.modules", {"librosa": SimpleNamespace(get_duration=lambda **_: 10)}), \
+             patch("soramimic_score.models.transcribe_whisper_views",
+                   return_value={"mix": (spoken,), "vocals": (spoken,)}) as lexical, \
+             patch("soramimic_score.models.transcribe_kana_views",
+                   return_value={"mix": (spoken,), "vocals": (spoken,)}) as transcribe:
+            result = create_adapters(self.config, vocals_path=self.root / "vocals.wav").reading_selector(
+                self.audio, (LyricLine("明日も🧭君と歩こう", 2, 5),))
+        transcribe.assert_called_once()
+        lexical.assert_called_once()
+        self.assertEqual(result[0].kana, spoken)
+        self.assertEqual(result[0].detail["symbol_proposals"], [spoken])
+
+    def test_full_recognition_context_is_scoped_to_matching_audio_and_time(self):
+        slot = {"start": 3, "end": 4, "surface": "🧭", "mapped": True,
+                "kana_start": 4, "kana_end": 4}
+        base = "アシタモキミトアルコウ"
+        shared = SimpleNamespace(run=lambda *_args, **_kwargs: {
+            "requested_language": "ja", "lines": [
+                {"start_sec": 1., "end_sec": 4., "text": "あしたも冒険きみとあるこう"},
+                {"start_sec": 8., "end_sec": 9., "text": "別の区間"},
+            ]})
+        with patch("soramimic_score.models.dictionary_readings", return_value=(
+                ReadingSelection(base, "soramimic-yomi", 1, (base,)),)), \
+             patch("soramimic_score.models.symbol_slots", return_value=(slot,)), \
+             patch("soramimic_score.models.symbol_reading_proposals", return_value=((), ())), \
+             patch("soramimic_score.models.refine_symbol_reading",
+                   side_effect=lambda _text, selected, *_args, **_kwargs: selected) as refine, \
+             patch.dict("sys.modules", {"librosa": SimpleNamespace(get_duration=lambda **_: 10)}), \
+             patch("soramimic_score.models._transcribe_shared_kana", return_value=(base,)), \
+             patch("soramimic_score.models.transcribe_whisper_views", return_value={"mix": ("字幕",)}):
+            adapters = create_adapters(self.config, shared=shared)
+            adapters.lyric_recognizer(self.audio)
+            lines = (LyricLine("明日も🧭君と歩こう", 2, 5),)
+            adapters.reading_selector(self.audio, lines)
+            views = refine.call_args.args[3]
+            self.assertEqual(views["mix:full-context"], "あしたも冒険きみとあるこう")
+            self.assertEqual(views["mix"], "字幕")
+            other = self.root / "other.wav"
+            other.write_bytes(self.audio.read_bytes())
+            adapters.reading_selector(other, lines)
+            self.assertNotIn("mix:full-context", refine.call_args.args[3])
+
     @unittest.skipUnless(importlib.util.find_spec("librosa"), "audio dependencies not installed")
     def test_audio_views_and_windows_are_used_for_selection(self):
         vocals = self.root / "vocals.wav"
