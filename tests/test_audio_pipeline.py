@@ -164,7 +164,7 @@ class AudioPipelineTests(unittest.TestCase):
         self.assertEqual(contextual_non_lyric_template_families(lines),
                          ("credits", "credits"))
 
-    def test_soft_template_requires_its_own_ctc_support(self):
+    def test_note_supported_template_survives_weak_ctc(self):
         self.assertEqual(non_lyric_template_family("お疲れさま"), "closing-greeting")
         lines = (LyricLine("お疲れさま", 0, .4), LyricLine("空", .4, .8))
         passes = []
@@ -185,12 +185,23 @@ class AudioPipelineTests(unittest.TestCase):
 
         score = analyze_audio(self.audio, AudioAdapters(
             readings, align, self._melody, lambda _: lines))
-        self.assertEqual(passes, [("お疲れさま", "空"), ("空",)])
-        self.assertEqual(score.score.canonical_text, "空")
+        self.assertEqual(passes, [("お疲れさま", "空")])
+        self.assertEqual(score.score.canonical_text, "お疲れさま\n空")
+        warning = next(item for item in score.observations.evidence
+                       if item.kind == "lyric-alignment-warning")
+        self.assertEqual(warning.detail["status"], "retained")
+        self.assertEqual(warning.detail["note_candidate_ids"], ["audio-note-0", "audio-note-1"])
         low_score = False
         supported = analyze_audio(self.audio, AudioAdapters(
             readings, align, self._melody, lambda _: lines))
         self.assertEqual(supported.score.canonical_text, "お疲れさま\n空")
+
+        low_score = True
+        without_notes = analyze_audio(self.audio, AudioAdapters(
+            readings, align, lambda path: self._melody(path)[2:], lambda _: lines))
+        self.assertEqual(without_notes.score.canonical_text, "空")
+        self.assertFalse(any(item.kind == "lyric-alignment-warning"
+                             for item in without_notes.observations.evidence))
 
     def test_silent_vocal_stem_rejects_unresolved_whisper_line(self):
         lines = (LyricLine("空", 0, .4), LyricLine("何もない", 1, 2))
@@ -246,7 +257,7 @@ class AudioPipelineTests(unittest.TestCase):
         ))
         self.assertEqual(score.score.canonical_text, "耳")
 
-    def test_weak_ctc_rejects_credit_retry_before_final_score(self):
+    def test_note_supported_credit_retry_survives_weak_ctc(self):
         def notes(_path):
             return (MelodyNote(0, 2, 60), MelodyNote(2.2, 2.6, 62))
 
@@ -268,8 +279,13 @@ class AudioPipelineTests(unittest.TestCase):
             lyric_recoverer=lambda _path, start, end:
                 (LyricLine("空", start, start + .4),),
         ))
-        self.assertEqual(score.score.canonical_text, "耳")
-        self.assertEqual(passes, [("空", "耳"), ("耳",)])
+        self.assertEqual(score.score.canonical_text, "空\n耳")
+        self.assertEqual(passes, [("空", "耳")])
+        self.assertTrue(any(slot.start_sec < 2 for slot in score.score.synthesis_plan))
+        warning = next(item for item in score.observations.evidence
+                       if item.kind == "lyric-alignment-warning")
+        self.assertTrue(warning.detail["credit_recovery"])
+        self.assertEqual(warning.detail["ctc_median_score"], .0001)
 
     def test_supplied_credit_text_remains_authoritative(self):
         credit = "作詞・作曲・編曲 初音ミク"
