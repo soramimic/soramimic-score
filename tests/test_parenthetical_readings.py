@@ -94,6 +94,29 @@ class ParentheticalCandidateTests(unittest.TestCase):
         decided = choose_reading(options, {'mix': 'サダメダ', 'vocals': 'サダメダ'})
         self.assertEqual(options['choices'][decided['selected']]['reading'], 'サダメ')
 
+    def test_normal_whisper_can_confirm_one_shared_dictionary_reading(self):
+        options, = self.options('未来(みらい)へ')
+        decision = choose_reading(options, {'whisper': 'ミライヘ'}, recognition_text='未来へ')
+        self.assertEqual(decision['status'], 'resolved')
+        self.assertEqual(options['choices'][decision['selected']]['mode'], 'annotation')
+
+    def test_context_reading_disagreement_does_not_hide_annotation_agreement(self):
+        def alternatives(text):
+            kana, = fixture_readings(text)
+            return tuple(dict.fromkeys((kana, kana.replace('ボク', 'ワタシ'))))
+        text = '僕の未来(みらい)'
+        options = reading_options(text, alternatives, word_starts=lambda _: (0, 1, 2))
+        decisions = [choose_reading(o, {'mix': 'ボクノミライ', 'vocals': 'ワタシノミライ'})
+                     for o in options]
+        self.assertEqual(resolved_text(text, options, decisions), '僕の｜未来《ミライ》')
+
+    def test_neighboring_annotations_remain_context_alternatives(self):
+        text = '運命(さだめ)だ　未来(あす)へ'
+        options = self.options(text)
+        decisions = [choose_reading(o, {'mix': 'サダメダアスヘ', 'vocals': 'サダメダアスヘ'})
+                     for o in options]
+        self.assertEqual(resolved_text(text, options, decisions), '｜運命《サダメ》だ　｜未来《アス》へ')
+
     def test_pronounced_base_and_repeated_words_remain_real_candidates(self):
         for text, heard, expected in [('運命(さだめ)だ', 'ウンメーダ', '｜運命《ウンメー》だ'),
                                       ('誰だ(だれだ)', 'ダレダダレダ', '｜誰だ《ダレダ》(だれだ)')]:

@@ -139,9 +139,9 @@ def reading_options(text: str, readings: Callable[[str], Sequence[str]], *,
                     word_starts: Callable[[str], Sequence[int]] | None = None) -> tuple[dict, ...]:
     """Generate literal, base and annotation readings, including dictionary-external kana.
 
-    Each parenthesis is compared with the same surrounding text. Other reading
-    candidates are collapsed only in the matching context, never in the output.
-    Scope candidates start at morphological boundaries; no mora-length pruning.
+    Each parenthesis is compared with the same surrounding text. Other
+    annotations and dictionary readings remain context alternatives. Scope
+    candidates start at morphological boundaries; no mora-length pruning.
     """
     found = parentheses(text)
     if not found:
@@ -157,17 +157,16 @@ def reading_options(text: str, readings: Callable[[str], Sequence[str]], *,
 
     output = []
     for item in found:
-        prefix, _ = matching_forms(text[:item.run_start])
-        suffix, _ = matching_forms(text[item.end:])
+        prefixes = (*matching_forms(text[:item.run_start]), text[:item.run_start])
+        suffixes = (*matching_forms(text[item.end:]), text[item.end:])
         run = text[item.run_start:item.base_end]
         starts = {item.base_start}
         starts.update(item.run_start + i for i in word_starts(run)
                       if _HAS_KANJI.search(run[i:]))
         choices = []
+        seen = set()
         for start in sorted(starts, reverse=True):
             base = text[start:item.base_end]
-            left = prefix + text[item.run_start:start]
-            right = text[item.base_end:item.start] + suffix
             for mode, pronunciation in [
                 ("annotation", item.reading),
                 *(("base", reading) for reading in convert(base)),
@@ -175,13 +174,15 @@ def reading_options(text: str, readings: Callable[[str], Sequence[str]], *,
             ]:
                 # Explicit local ruby prevents the dictionary from appending the
                 # supplied kana to a reading of the base during this comparison.
-                kana = convert(left + f"｜{base}《{pronunciation}》" + right)[0]
-                if not kana:
-                    continue
-                choices.append({"mode": mode, "start": start, "base": base,
-                                "reading": pronunciation, "kana": kana,
-                                "rendered": (text if mode == "literal" else
-                                             _render(text, item, start, pronunciation))})
+                for prefix, suffix in dict.fromkeys(zip(prefixes, suffixes, strict=True)):
+                    left = prefix + text[item.run_start:start]
+                    right = text[item.base_end:item.start] + suffix
+                    for kana in convert(left + f"｜{base}《{pronunciation}》" + right):
+                        key = mode, start, pronunciation, kana
+                        if kana and key not in seen:
+                            choices.append({"mode": mode, "start": start, "base": base,
+                                            "reading": pronunciation, "kana": kana})
+                            seen.add(key)
         output.append({"span": item, "choices": choices})
     return tuple(output)
 
@@ -190,9 +191,9 @@ def choose_reading(options: dict, transcripts: dict[str, str], *,
                    recognition_text: str | None = None) -> dict:
     """Require a unique pronunciation supported by every available audio view.
 
-    Ordinary Whisper can finish an exact, contextual match when it actually
-    spells a discriminating reading. Re-reading the same input kanji through a
-    dictionary cannot establish its pronunciation. Acoustic ties preserve the
+    Ordinary Whisper can distinguish one occurrence from a repeated reading.
+    Re-reading the same input kanji cannot establish a dictionary-external
+    pronunciation. Acoustic ties preserve the
     literal text, including repeated words and overlapping backing responses.
     """
     is_whisper = recognition_text is not None
@@ -223,34 +224,62 @@ def choose_reading(options: dict, transcripts: dict[str, str], *,
         return decision
     if len(evidence) != len(transcripts):
         return decision | {"reason": "incomplete-evidence"}
-    # Different scopes or modes with the same performed pronunciation are not
-    # an acoustic ambiguity. Prefer the supplied annotation, then shorter scopes.
+    # Marginalize unrelated dictionary/context alternatives: disagreement about
+    # another word must not masquerade as ambiguity about this parenthesis.
+    # Equal performed pronunciations also cannot distinguish scopes or modes.
     keys = [_key(choice["kana"]) for choice in choices]
-    # Full-window correspondence penalizes lost context and missed repetitions.
-    # Substring distance alone rewards replacing a whole clause with a short
-    # annotation. Use it only to assess quality independently of window padding.
-    totals = [(sum(row["full_costs"].values()), sum(row["costs"].values())) for row in rows]
-    best = min(range(len(choices)), key=lambda i: (totals[i],
-               choices[i]["mode"] != "annotation", -choices[i]["start"]))
-    winner = keys[best]
-    rivals = [i for i, key in enumerate(keys) if key != winner]
-    if any(totals[i] == totals[best] for i in rivals):
+    parents = list(range(len(choices)))
+
+    def root(i):
+        while parents[i] != i:
+            parents[i] = parents[parents[i]]
+            i = parents[i]
+        return i
+
+    by_action, by_sound = {}, {}
+    for i, choice in enumerate(choices):
+        action = (choice["mode"] == "literal", choice["start"], _key(choice["reading"]))
+        for table, key in ((by_action, action), (by_sound, keys[i])):
+            if key in table:
+                parents[root(i)] = root(table[key])
+            table[key] = i
+    groups = {}
+    for i in range(len(choices)):
+        groups.setdefault(root(i), []).append(i)
+    supports = {group: {view: min(indices, key=lambda i: (
+                    rows[i]["full_costs"][view], rows[i]["costs"][view]))
+                       for view in evidence} for group, indices in groups.items()}
+    costs = {group: {view: (rows[i]["full_costs"][view], rows[i]["costs"][view])
+                    for view, i in support.items()} for group, support in supports.items()}
+    totals = {group: tuple(sum(row[j] for row in views.values()) for j in (0, 1))
+              for group, views in costs.items()}
+    best_group = min(groups, key=lambda group: totals[group])
+    rivals = [group for group in groups if group != best_group]
+    if any(totals[group] == totals[best_group] for group in rivals):
         return decision | {"reason": "ambiguous-evidence"}
-    if any((rows[best]["full_costs"][view], rows[best]["costs"][view])
-           >= (rows[i]["full_costs"][view], rows[i]["costs"][view])
-           for i in rivals for view in evidence):
+    if any(costs[best_group][view] >= costs[group][view]
+           for group in rivals for view in evidence):
         return decision | {"reason": "conflicting-evidence"}
+    best = min(groups[best_group], key=lambda i: (
+        choices[i]["mode"] != "annotation", -choices[i]["start"],
+        sum(rows[i]["full_costs"].values())))
     choice = choices[best]
-    max_error = max(rows[best]["costs"].values()) / max(1, len(winner))
-    if max_error > (0. if is_whisper else .25):
+    max_error = max(rows[i]["costs"][view] / max(1, len(keys[i]))
+                    for view, i in supports[best_group].items())
+    if max_error > .25:
         return decision | {"reason": "weak-evidence"}
     if is_whisper and choice["mode"] != "literal":
         normalized = unicodedata.normalize("NFKC", recognition_text)
-        if any(unicodedata.normalize("NFKC", row["base"]) in normalized for row in choices):
+        same_word = any(unicodedata.normalize("NFKC", row["base"]) in normalized
+                        for row in choices)
+        shared_reading = choice["mode"] == "annotation" and any(
+            row["mode"] == "base" and row["start"] == choice["start"]
+            and _key(row["reading"]) == _key(choice["reading"]) for row in choices)
+        if same_word and not shared_reading:
             return decision | {"reason": "kanji-reading-not-observed"}
     return decision | {"status": "retained-sung" if choice["mode"] == "literal" else "resolved",
-                       "reason": "exact-whisper-match" if is_whisper else "acoustic-agreement",
-                       "selected": best}
+                       "reason": "whisper-agreement" if is_whisper else "acoustic-agreement",
+                       "selected": best, "supporting_candidates": supports[best_group]}
 
 
 def resolved_text(text: str, options: Sequence[dict], decisions: Sequence[dict]) -> str:
