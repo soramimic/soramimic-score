@@ -133,6 +133,37 @@ class LocalRecoveryTests(unittest.TestCase):
         self.assertFalse(is_pathological_repeated_vocalization(LyricLine("ラ" * 6, 0, 2), notes))
         self.assertTrue(is_pathological_repeated_vocalization(LyricLine("ラ" * 70, 0, 2), notes))
         self.assertFalse(is_pathological_repeated_vocalization(LyricLine("カ" * 70, 0, 2), notes))
+        self.assertFalse(is_pathological_repeated_vocalization(
+            LyricLine("だん" * 3, 0, 2), notes))
+        self.assertTrue(is_pathological_repeated_vocalization(
+            LyricLine("だん" * 70 + "だ", 0, 2), notes))
+
+    def test_nasal_repetition_retry_is_bounded_before_alignment(self):
+        notes = (MelodyNote(0, 2, 60), MelodyNote(2.5, 3, 62))
+        for recovered, expected in (("だん" * 3, "ダンダンダン\nカ"),
+                                    ("だん" * 70 + "だ", "カ")):
+            with self.subTest(recovered_moras=len(recovered)):
+                def readings(_path, lines):
+                    return tuple(ReadingSelection(line.text, "test", 1) for line in lines)
+
+                def align(_path, lines, selected):
+                    self.assertTrue(all(len(item.kana) <= 6 for item in selected))
+                    return tuple(AlignedMora(i, j, char, line.start_sec + j * .25,
+                                            line.start_sec + (j + 1) * .25, .0001)
+                                 for i, (line, reading) in enumerate(zip(lines, selected))
+                                 for j, char in enumerate(reading.kana))
+
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "input.wav"
+                    path.write_bytes(b"model adapter fixture")
+                    document = analyze_audio(path, AudioAdapters(
+                        readings, align, lambda _: notes, lambda _: (
+                            LyricLine("作詞・作曲・編曲 初音ミク", 0, 2),
+                            LyricLine("カ", 2.5, 3)),
+                        lyric_recoverer=lambda _path, start, end:
+                            (LyricLine(recovered, start, end),),
+                    ))
+                self.assertEqual(document.score.canonical_text, expected)
 
     def test_decoder_runaway_is_omitted_from_automatic_score(self):
         notes = tuple(MelodyNote(i * .25, (i + 1) * .25, 60) for i in range(12))

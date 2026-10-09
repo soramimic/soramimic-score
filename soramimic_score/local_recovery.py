@@ -59,7 +59,7 @@ def coalesce_repeated_suffix_fragments(lines: Sequence[LyricLine]
     return tuple(merged), tuple(evidence)
 
 
-_VOCALIZATION_KANA = frozenset("アァイィウゥエェオォラナダファハヤワー")
+_VOCALIZATION_KANA = frozenset("アァイィウゥエェオォラナダファハヤワンー")
 _LATIN_VOCALIZATION = re.compile(r"wow|la|na|da|fa|ha|ya|a+h*|i+|u+h*|e+|o+h*")
 _LATIN_MORAS = {"wow": ("ワ", "ウ"), "la": ("ラ",), "na": ("ナ",),
                 "da": ("ダ",), "fa": ("ファ",), "ha": ("ハ",), "ya": ("ヤ",)}
