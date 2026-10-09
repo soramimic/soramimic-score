@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 import math
 import logging
 from pathlib import Path
@@ -14,6 +15,8 @@ from .audio import (AudioAdapters, AlignedMora, CTCWindowCapacityError,
 from .audio import _run_adapter
 from .acoustic import KANA_MODEL, release_memory as _release, separate_vocals, transcribe_kana_views
 from .japanese import kana_to_moras, katakana
+from .parenthetical import (choose_reading, reading_options, resolved_text,
+                            selection_detail)
 from .readings import (dictionary_readings, grouped_acoustic_windows,
                        select_acoustic_reading, token_reading_proposals)
 
@@ -355,16 +358,51 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
             del model
             _release()
 
-    def select_readings(path, lines, *, automatic=False):
+    def select_readings(path, lines, *, automatic=False, recognition=None):
+        originals = tuple(lines)
+        options = [()] * len(lines)
+        decisions = [[] for _ in lines]
+        if recognition is not None:
+            if len(recognition) != len(lines):
+                raise ValueError("one recognition context is required per supplied line")
+
+            @lru_cache(maxsize=None)
+            def convert(text):
+                return dictionary_readings(path, (LyricLine(text),))[0].candidates
+
+            for index, (line, context) in enumerate(zip(lines, recognition, strict=True)):
+                options[index] = reading_options(line.text, convert)
+                if not options[index]:
+                    continue
+                try:
+                    observed = {f"whisper-reading-{i}": reading
+                                for i, reading in enumerate(convert(context))} if context else {}
+                except ValueError:
+                    observed = {}
+                decisions[index] = [choose_reading(option, observed,
+                                                   recognition_text=context or "")
+                                    for option in options[index]]
+            lines = tuple(replace(line, text=resolved_text(line.text, opts, choices))
+                          for line, opts, choices in zip(lines, options, decisions, strict=True))
+
+        def finish(readings):
+            return tuple(replace(reading, detail={
+                **reading.detail,
+                **selection_detail(original.text, line.text, opts, choices),
+            }) if opts else reading
+                for original, line, reading, opts, choices in zip(
+                    originals, lines, readings, options, decisions, strict=True))
+
         defaults = dictionary_readings(path, lines, automatic=automatic)
         candidates = tuple(reading.candidates for reading in defaults)
         potential = (tuple(token_reading_proposals(line.text, candidates[index][0])
                            for index, line in enumerate(lines)) if automatic else
                      ((),) * len(lines))
         ambiguous = [index for index, row in enumerate(candidates)
-                     if len(row) > 1 or potential[index]]
+                     if len(row) > 1 or potential[index]
+                     or any(choice["status"] == "unresolved" for choice in decisions[index])]
         if not ambiguous:
-            return defaults
+            return finish(defaults)
         if all(line.start_sec is not None and line.end_sec is not None for line in lines):
             line_windows = [(line.start_sec, line.end_sec) for line in lines]
         else:
@@ -377,13 +415,32 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
         import librosa
         duration = librosa.get_duration(path=str(path))
         windows, assignments = grouped_acoustic_windows(
-            line_windows, range(len(lines)), duration)
+            line_windows, ambiguous if any(options) else range(len(lines)), duration)
         paths = {"mix": path}
         if vocals_path is not None:
             paths["vocals"] = vocals_path
         transcripts = kana_views(paths, windows)
+        changed = False
+        for index in ambiguous:
+            views = {view: "".join(rows[i] for i in assignments[index])
+                     for view, rows in transcripts.items()}
+            for i, option in enumerate(options[index]):
+                previous = decisions[index][i]
+                if previous["status"] == "unresolved":
+                    decisions[index][i] = choose_reading(option, views) | {"whisper": previous}
+            resolved = resolved_text(originals[index].text, options[index], decisions[index])
+            if resolved != lines[index].text:
+                updated = list(lines)
+                updated[index] = replace(lines[index], text=resolved)
+                lines = tuple(updated)
+                changed = True
+        if changed:
+            defaults = dictionary_readings(path, lines, automatic=automatic)
+            candidates = tuple(reading.candidates for reading in defaults)
         result = list(defaults)
         for index in ambiguous:
+            if len(candidates[index]) == 1 and not potential[index]:
+                continue
             views = {view: "".join(rows[i] for i in assignments[index])
                      for view, rows in transcripts.items()}
             proposals = (token_reading_proposals(
@@ -398,7 +455,7 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
                 "model": config.kana_model,
                 "vocal_separator": "demucs-htdemucs" if vocals_path else None,
             })
-        return tuple(result)
+        return finish(result)
 
     def lyric_reading(text):
         return dictionary_readings(None, (LyricLine(text),))[0].kana
@@ -470,6 +527,9 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
         import librosa
         return float(librosa.get_duration(path=str(path)))
 
+    def supplied_readings(path, lines, recognition):
+        return select_readings(path, lines, recognition=recognition)
+
     return AudioAdapters(select_readings if config.acoustic_readings else dictionary_readings,
                          align, melody, recognize, lyric_reading, recover_window,
                          repeat_evidence, vocal_activity if vocals_path is not None else None,
@@ -481,4 +541,5 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
                          if config.romaji_model is not None and vocals_path is not None else None,
                          melody_recoverer
                          if config.romaji_model is not None and vocals_path is not None else None,
-                         audio_duration, dictionary_readings)
+                         audio_duration, dictionary_readings,
+                         supplied_readings if config.acoustic_readings else None)

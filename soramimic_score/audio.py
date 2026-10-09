@@ -125,6 +125,9 @@ class AudioAdapters:
     melody_recoverer: Callable[[Path, float, float], Sequence[MelodyNote]] | None = None
     audio_duration: Callable[[Path], float] | None = None
     dictionary_reading_selector: ReadingSelector | None = None
+    supplied_reading_selector: Callable[
+        [Path, Sequence[LyricLine], Sequence[str | None]], Sequence[ReadingSelection]
+    ] | None = None
 
 
 class AudioPipelineError(RuntimeError):
@@ -776,9 +779,16 @@ def analyze_audio(
         on_progress("歌詞の読みを確認しています")
     active_indices = [i for i in range(len(lines)) if i not in unobserved_lines]
     active_lines = tuple(lines[i] for i in active_indices)
-    active_readings = _validate_readings(active_lines, _run_adapter(
-        "readings", reading_selector, path, active_lines,
-    )) if active_lines else ()
+    if active_lines and overlay is not None and adapters.supplied_reading_selector is not None:
+        contexts = tuple(overlay["groups"][i]["original_text"]
+                         if overlay["groups"][i]["operation"] == "match" else None
+                         for i in active_indices)
+        active_readings = _validate_readings(active_lines, _run_adapter(
+            "readings", adapters.supplied_reading_selector, path, active_lines, contexts))
+    else:
+        active_readings = _validate_readings(active_lines, _run_adapter(
+            "readings", reading_selector, path, active_lines,
+        )) if active_lines else ()
     selected = dict(zip(active_indices, active_readings, strict=True))
     if unobserved_lines:
         silent_lines = tuple(lines[i] for i in unobserved_lines)
@@ -788,10 +798,20 @@ def analyze_audio(
         ))
         selected.update(zip(unobserved_lines, defaults, strict=True))
     readings = tuple(selected[i] for i in range(len(lines)))
+    # A resolved reading annotation is not a second sung occurrence. Preserve
+    # the supplied form and every comparison in reading-selection evidence.
+    lines = tuple(replace(line, text=reading.detail["resolved_text"])
+                  if "parenthetical_readings" in reading.detail else line
+                  for line, reading in zip(lines, readings, strict=True))
     if overlay is not None:
-        for group, reading in zip(overlay["groups"], readings, strict=True):
+        for group, line, reading in zip(overlay["groups"], lines, readings, strict=True):
             group["acoustic_reading"] = reading.kana
             group["reading_candidates"] = list(reading.candidates)
+            if "parenthetical_readings" in reading.detail:
+                group["supplied_display_text"] = group["display_text"]
+                group["display_text"] = strip_ruby(line.text)
+                group["parenthetical_readings"] = reading.detail["parenthetical_readings"]
+        overlay["display_text"] = "\n".join(group["display_text"] for group in overlay["groups"])
         overlay.pop("acoustic_changes", None)
         overlay["readings_fixed_before_alignment"] = True
     lines = tuple(replace(line, text=strip_ruby(line.text)) for line in lines)
