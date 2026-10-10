@@ -11,7 +11,8 @@ from threading import Lock
 import unicodedata
 
 from .audio import LyricLine, ReadingSelection
-from .japanese import _RUBY, kana_to_moras, katakana, mora_vowel, normalize_reading
+from .japanese import (_RUBY, kana_to_moras, katakana, mora_vowel,
+                       normalize_lyric_input, normalize_reading)
 
 
 _YOMI_LOCK = Lock()
@@ -102,9 +103,10 @@ def dictionary_candidates(lines):
     tagger = MeCab.Tagger(f'-d "{unidic_lite.DICDIR}"')
     output = []
     for line in lines:
-        primary, _ = _node_reading(tagger.parseToNode(line.text))
+        text = normalize_lyric_input(line.text)
+        primary, _ = _node_reading(tagger.parseToNode(text))
         candidates = [primary]
-        tagger.parseNBestInit(line.text)
+        tagger.parseNBestInit(text)
         for _ in range(8):
             node = tagger.nextNode()
             if node is None:
@@ -130,6 +132,10 @@ def dictionary_readings(_path, lines, *, automatic=False):
 
     output = []
     for line in lines:
+        text = normalize_lyric_input(line.text)
+        input_detail = ({"lyric_input_normalization": {
+            "original_text": line.text, "normalized_text": text,
+        }} if text != line.text else {})
         if _RUBY.search(line.text):
             parts = []
             cursor = 0
@@ -151,12 +157,13 @@ def dictionary_readings(_path, lines, *, automatic=False):
             candidates = tuple(dict.fromkeys("".join(row) for row in islice(product(*parts), 32)))
             output.append(ReadingSelection(candidates[0], "explicit-ruby", 1.0, candidates, {
                 "reason": "supplied-ruby", "confidence_available": False,
+                **input_detail,
             }))
             continue
         provenance = {}
         # Yomi initializes a process-wide OpenJTalk user dictionary lazily.
         with _YOMI_LOCK:
-            yomi_candidates = get_yomi_candidates(line.text, nbest=32)
+            yomi_candidates = get_yomi_candidates(text, nbest=32)
         for candidate in yomi_candidates:
             try:
                 kana = normalize_reading(candidate.reading)
@@ -194,6 +201,7 @@ def dictionary_readings(_path, lines, *, automatic=False):
             "reason": "dictionary", "confidence_available": False,
             "candidate_provenance": [provenance[candidate] for candidate in candidates],
             "yomi_status": yomi_status, "unidic_status": unidic_status,
+            **input_detail,
         }))
     return tuple(output)
 
@@ -241,6 +249,7 @@ def _comparison_kana(text, *, evidence=False):
 
 def token_reading_proposals(surface_text, default_reading, evidence=None):
     """Video-style single-token alternatives with two-mora local context."""
+    surface_text = normalize_lyric_input(surface_text)
     from soramimic_yomi import get_tokens
 
     with _YOMI_LOCK:

@@ -22,7 +22,8 @@ if TYPE_CHECKING:
 from .alignment import ObservedSingingUnit, build_known_lyrics_document
 from .document import ScoreDocument, compile_score
 from .ir import Boundary, Evidence, IntermediateRepresentation, NoteCandidate
-from .japanese import LyricSpan, ReadingCandidate, kana_to_moras, mora_vowel, normalize_reading
+from .japanese import (LyricSpan, ReadingCandidate, kana_to_moras, mora_vowel,
+                       normalize_lyric_input, normalize_reading)
 from .line_windows import snap_line_windows_to_rests
 from .local_recovery import (adjacent_repeat_groups,
                              coalesce_repeated_suffix_fragments, deficit_windows,
@@ -171,9 +172,13 @@ def _validate_lines(lines: Sequence[LyricLine], *, timed: bool) -> tuple[LyricLi
         raise AudioPipelineError("lyrics", "no lyric lines were produced")
     previous_end = 0.0
     normalized = []
-    for line in result:
+    for index, line in enumerate(result):
         if not isinstance(line.text, str) or not line.text.strip():
             raise AudioPipelineError("lyrics", "lyric lines must contain text")
+        try:
+            normalize_lyric_input(line.text)
+        except ValueError as exc:
+            raise AudioPipelineError("lyrics", f"line {index + 1}: {exc}") from exc
         if line.confidence is not None:
             _confidence(line.confidence, "lyrics")
         if timed:
@@ -422,6 +427,10 @@ def analyze_audio(
         raise ValueError("Specify adapters or model_config, not both")
     if adjust_lyrics and lyrics is None:
         raise ValueError("adjust_lyrics requires supplied lyrics")
+    if lyrics is not None:
+        if isinstance(lyrics, (str, bytes)):
+            raise TypeError("lyrics must be a sequence of lines, not one string")
+        _validate_lines(tuple(LyricLine(text) for text in lyrics), timed=False)
     if adapters is None:
         from .models import prepared_adapters
         from .media import decoded_audio
@@ -440,10 +449,6 @@ def analyze_audio(
                 return analyze_audio(prepared_path, prepared, lyrics=lyrics,
                                      adjust_lyrics=adjust_lyrics, on_progress=on_progress)
 
-    if lyrics is not None:
-        if isinstance(lyrics, (str, bytes)):
-            raise TypeError("lyrics must be a sequence of lines, not one string")
-        _validate_lines(tuple(LyricLine(text) for text in lyrics), timed=False)
     reading_selector = (adapters.automatic_reading_selector
                         if lyrics is None and adapters.automatic_reading_selector is not None
                         else adapters.reading_selector)

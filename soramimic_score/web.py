@@ -235,6 +235,11 @@ def create_app(*, data_root: Path | None = None, analyzer=None, public: bool | N
     @app.post("/api/jobs")
     async def submit(request: Request, audio: UploadFile = File(...), lyrics: str = Form("")):
         _prune(root, db)
+        from .japanese import normalize_lyric_input
+        try:
+            normalize_lyric_input(lyrics)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
         if len(lyrics.encode("utf-8")) > 200_000:
             raise HTTPException(413, "歌詞が大きすぎます")
         suffix = Path(audio.filename or "").suffix.lower()
