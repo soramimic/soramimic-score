@@ -19,7 +19,8 @@ from dataclasses import asdict, dataclass, replace
 import math
 from typing import Mapping, Sequence
 
-from .ir import IntermediateRepresentation, NoteCandidate, SingingUnit
+from .ir import (MINIMUM_USABLE_TIMING_CONFIDENCE, IntermediateRepresentation,
+                 NoteCandidate, SingingUnit)
 from .japanese import SPECIAL_MORAS, kana_to_syllables
 
 
@@ -160,6 +161,7 @@ class _Unit:
     ctc_onset_sec: float | None
     must_assign: bool
     independent_phase: bool = False
+    onset_supports_timing: bool = True
 
     @property
     def is_special(self) -> bool:
@@ -183,7 +185,7 @@ class _Path:
 
 def _ctc_onsets(
     document: IntermediateRepresentation, unit: SingingUnit,
-) -> tuple[float, ...]:
+) -> tuple[tuple[float, bool], ...]:
     evidence = {item.id: item for item in document.evidence}
     values = []
     for evidence_id in unit.evidence_ids:
@@ -197,8 +199,14 @@ def _ctc_onsets(
         if (isinstance(value, bool) or not isinstance(value, (int, float))
                 or not math.isfinite(value) or value < 0):
             raise ValueError("lyric onset evidence needs a finite nonnegative time_sec")
-        values.append((item.id, float(value)))
-    return tuple(value for _identifier, value in sorted(
+        # A posterior floor is not evidence for the exact onset. Keep the
+        # canonical mora and its raw observation, but do not pull its assignment
+        # toward that peak. Derived acoustic anchors have no CTC posterior.
+        usable = (item.kind != "mora-ctc-anchor"
+                  or item.detail.get("confidence_available") is False
+                  or item.confidence >= MINIMUM_USABLE_TIMING_CONFIDENCE)
+        values.append((item.id, float(value), usable))
+    return tuple((value, usable) for _identifier, value, usable in sorted(
         values, key=lambda item: (item[1], item[0]),
     ))
 
@@ -218,24 +226,25 @@ def _units(
     for utterance in document.utterances:
         source_units = tuple(unit for unit in document.singing_units
                              if owner[unit.id] == utterance.id)
-        atoms: list[tuple[SingingUnit, tuple[str, ...], str, float | None]] = []
+        atoms: list[tuple[SingingUnit, tuple[str, ...], str, float | None, bool]] = []
         for unit in source_units:
             onsets = _ctc_onsets(document, unit)
             if len(unit.mora_ids) > 1 and len(onsets) == len(unit.mora_ids):
-                atoms.extend((unit, (mora_id,), moras[mora_id].text, onset)
-                             for mora_id, onset in zip(
+                atoms.extend((unit, (mora_id,), moras[mora_id].text, onset, usable)
+                             for mora_id, (onset, usable) in zip(
                                  unit.mora_ids, onsets, strict=True))
             else:
                 atoms.append((
                     unit, unit.mora_ids,
                     "".join(moras[mid].text for mid in unit.mora_ids),
-                    onsets[0] if len(onsets) == 1 else None,
+                    onsets[0][0] if len(onsets) == 1 else None,
+                    onsets[0][1] if len(onsets) == 1 else False,
                 ))
         syllables = kana_to_syllables("".join(item[2] for item in atoms))
         base_indices = []
         syllable_index = 0
         accumulated = ""
-        for _unit, _moras, text, _onset in atoms:
+        for _unit, _moras, text, _onset, _usable in atoms:
             if syllable_index >= len(syllables):
                 raise ValueError("singing units do not preserve the selected syllables")
             accumulated += text
@@ -248,7 +257,7 @@ def _units(
         if accumulated or syllable_index != len(syllables):
             raise ValueError("singing units do not cover every selected syllable")
         converted = []
-        for (unit, atom_moras, text, onset), base_index in zip(
+        for (unit, atom_moras, text, onset, usable), base_index in zip(
                 atoms, base_indices, strict=True):
             segments = ({segment_ids_by_mora[mid] for mid in atom_moras}
                         if segment_ids_by_mora is not None else set())
@@ -266,7 +275,7 @@ def _units(
                     for identifier in unit.evidence_ids
                 ) or (bool(phases) and not all(char in SPECIAL_MORAS for char in text)
                       and any(item.detail.get("pitched_note_support") is True for item in phases)),
-                bool(phases),
+                bool(phases), usable,
             ))
         result.append((utterance.id, tuple(converted)))
     return tuple(result)
@@ -309,11 +318,17 @@ def _coalesce(
 
 def _note_only(
     notes: Sequence[NoteCandidate], position: str, config: NoteRunConfig,
+    *, previous_note: NoteCandidate | None = None,
 ) -> NoteOnlySpan | None:
     if not notes:
         return None
     duration = sum(note.end_sec - note.start_sec for note in notes)
-    opening = (config.internal_note_only_open_weight if position == "internal"
+    # The inexpensive edge cost is for detached material, not a pitch-changing
+    # continuation immediately after the last sung note.
+    attached_tail = (position == "trailing" and previous_note is not None
+                     and notes[0].start_sec - previous_note.end_sec
+                     <= config.same_pitch_merge_gap_sec)
+    opening = (config.internal_note_only_open_weight if position == "internal" or attached_tail
                else config.edge_note_only_open_weight)
     cost = NoteRunCost(
         note_only_open=opening,
@@ -389,7 +404,8 @@ def _assignment_cost(
     return NoteRunCost(
         ctc_onset_distance=(
             config.ctc_onset_weight
-            * sum(abs(float(onset) - output_notes[0].start_sec) for onset in onsets)
+            * sum(abs(float(unit.ctc_onset_sec) - output_notes[0].start_sec)
+                  for unit in units if unit.onset_supports_timing)
             / config.ctc_onset_scale_sec
         ),
         whisper_line_ownership=ownership,
@@ -500,12 +516,15 @@ def _optimize_phrase(
                              tuple(note.id for note in selected), split),
                         )
     finalists = []
-    for (unit_index, cursor, _previous, _segment), path in states.items():
+    for (unit_index, cursor, previous, _segment), path in states.items():
         if unit_index != len(units):
             continue
         if any(note.id in required_note_ids for note in notes[cursor:]):
             continue
-        trailing = _note_only(notes[cursor:], "trailing", config)
+        trailing = _note_only(
+            notes[cursor:], "trailing", config,
+            previous_note=notes[previous] if previous is not None else None,
+        )
         step = (_Step(note_only_span=trailing, cost=trailing.cost)
                 if trailing is not None else _Step())
         finalists.append(_extend(path, step, (
