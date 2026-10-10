@@ -203,6 +203,99 @@ class AudioPipelineTests(unittest.TestCase):
         self.assertFalse(any(item.kind == "lyric-alignment-warning"
                              for item in without_notes.observations.evidence))
 
+    def test_language_retry_recovers_consecutive_templates_and_preserves_neighbor(self):
+        calls = []
+        template = "ご視聴ありがとうございました"
+        lines = (LyricLine(template, 0, 2), LyricLine(template, 2, 4),
+                 LyricLine("空", 4, 5))
+
+        def retry(path, start, end):
+            calls.append((path, start, end))
+            return (LyricLine("Follow the light", 0, 1.5),
+                    LyricLine("Hold my hand", 1.5, 4))
+
+        def readings(_path, chosen):
+            return tuple(ReadingSelection("ソラ", "test", 1) for _ in chosen)
+
+        def align(_path, chosen, selected):
+            return tuple(AlignedMora(index, offset, kana,
+                                     line.start_sec + offset * .1,
+                                     line.start_sec + (offset + 1) * .1, .8)
+                         for index, (line, reading) in enumerate(zip(chosen, selected))
+                         for offset, kana in enumerate(reading.kana))
+
+        adapters = AudioAdapters(
+            readings, align, lambda _: (MelodyNote(0, 1.5, 60),
+                                        MelodyNote(1.5, 4, 62), MelodyNote(4, 5, 64)),
+            lambda _: lines, template_lyric_recoverer=retry,
+        )
+        score = analyze_audio(self.audio, adapters)
+        self.assertEqual(calls, [(self.audio, 0, 4)])
+        self.assertEqual(score.score.canonical_text, "Follow the light\nHold my hand\n空")
+        recovery = next(item for item in score.observations.evidence
+                        if item.kind == "lyric-language-recovery")
+        self.assertEqual(recovery.detail["source_surfaces"], [template, template])
+        self.assertEqual(recovery.detail["source_segment_indices"], [0, 1])
+        self.assertEqual(recovery.detail["window"], [0, 4])
+        self.assertEqual(recovery.detail["recognition_language"], "auto")
+        self.assertEqual(recovery.detail["recovered_count"], 2)
+
+    def test_language_retry_leaves_unsupported_or_template_alternatives_unchanged(self):
+        template = "ご視聴ありがとうございました"
+
+        def readings(_path, chosen):
+            return tuple(ReadingSelection("ソラ", "test", 1) for _ in chosen)
+
+        invalid_retries = (
+            (), (LyricLine(template, 0, .8),), (LyricLine("別の日本語", 0, .8),),
+            (LyricLine("Thank you for watching!", 0, .8),),
+            (LyricLine("Follow the light", 0, .9),),
+            (LyricLine("Follow the light", .7, .3),),
+            (LyricLine("Follow the light", 0, .4), LyricLine("日本語", .4, .8)),
+            (LyricLine("123", 0, .8),),
+        )
+        baseline = analyze_audio(self.audio, AudioAdapters(
+            readings, self._moras, self._melody,
+            lambda _: (LyricLine(template, 0, .8),),
+        ))
+        for alternative in invalid_retries:
+            with self.subTest(alternative=alternative):
+                calls = []
+                def retry(_path, start, end):
+                    calls.append((start, end))
+                    return alternative
+                score = analyze_audio(self.audio, AudioAdapters(
+                    readings, self._moras, self._melody,
+                    lambda _: (LyricLine(template, 0, .8),),
+                    template_lyric_recoverer=retry,
+                ))
+                self.assertEqual(calls, [(0, .8)])
+                self.assertEqual(score.score.canonical_text, template)
+                self.assertEqual(score.score.synthesis_plan, baseline.score.synthesis_plan)
+                self.assertFalse(any(item.kind == "lyric-language-recovery"
+                                     for item in score.observations.evidence))
+
+    def test_language_retry_is_not_used_for_ordinary_or_supplied_lyrics(self):
+        calls = []
+        def unexpected(*_args):
+            calls.append(_args)
+            self.fail("ordinary or supplied lyrics must not trigger language recovery")
+
+        adapters = AudioAdapters(self._readings, self._moras, self._melody,
+                                 lambda _: (LyricLine("空", 0, .8),),
+                                 template_lyric_recoverer=unexpected)
+        self.assertEqual(analyze_audio(self.audio, adapters).score.canonical_text, "空")
+
+        template = "ご視聴ありがとうございました"
+        adapters = AudioAdapters(
+            lambda _path, lines: tuple(ReadingSelection("ソラ", "test", 1) for _ in lines),
+            self._moras, self._melody, lambda _: (LyricLine(template, 0, .8),),
+            template_lyric_recoverer=unexpected,
+        )
+        self.assertEqual(analyze_audio(self.audio, adapters, lyrics=(template,))
+                         .score.canonical_text, template)
+        self.assertEqual(calls, [])
+
     def test_silent_vocal_stem_rejects_unresolved_whisper_line(self):
         lines = (LyricLine("空", 0, .4), LyricLine("何もない", 1, 2))
         activity = (VocalActivity(-15, 0, 1, True),

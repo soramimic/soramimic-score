@@ -195,7 +195,7 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
             del model
             _release()
 
-    def recover_window(path, start, end):
+    def recover_window(path, start, end, *, language="ja"):
         """Retry a melody-supported credit span without the surrounding song."""
         import librosa
         if shared is not None:
@@ -209,12 +209,13 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
                 sf.write(excerpt, samples, 16000)
                 result = shared.run("whisper", excerpt, {
                     "model_size": config.whisper_model, "device": "auto",
-                    "language": "ja", "vad_filter": False,
+                    "language": language, "vad_filter": False,
                     "condition_on_previous_text": False, "temperature": 0.,
                 })
             if not isinstance(result, dict) or not isinstance(result.get("lines"), list):
                 raise RuntimeError("shared Whisper retry response is invalid")
-            if (result.get("requested_language") != "ja"
+            if ("requested_language" not in result
+                    or result["requested_language"] != language
                     or result.get("requested_temperature") != 0.):
                 raise RuntimeError("shared Whisper retry settings are unsupported")
             return tuple(LyricLine(str(item["text"]).strip(),
@@ -234,7 +235,7 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
                              compute_type="int8" if config.device == "cpu" else "float16",
                              local_files_only=config.local_files_only)
         try:
-            segments, _ = model.transcribe(samples, language="ja", vad_filter=False,
+            segments, _ = model.transcribe(samples, language=language, vad_filter=False,
                                            condition_on_previous_text=False,
                                            temperature=0.0)
             lines = []
@@ -593,6 +594,9 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
     def supplied_readings(path, lines, recognition):
         return select_readings(path, lines, recognition=recognition)
 
+    def template_recoverer(path, start, end):
+        return recover_window(path, start, end, language=None)
+
     return AudioAdapters(select_readings if config.acoustic_readings else dictionary_readings,
                          align, melody, recognize, lyric_reading, recover_window,
                          repeat_evidence, vocal_activity if vocals_path is not None else None,
@@ -605,4 +609,5 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
                          melody_recoverer
                          if config.romaji_model is not None and vocals_path is not None else None,
                          audio_duration, dictionary_readings,
-                         supplied_readings if config.acoustic_readings else None)
+                         supplied_readings if config.acoustic_readings else None,
+                         template_recoverer)

@@ -36,7 +36,8 @@ from .local_recovery import (adjacent_repeat_groups,
 from .note_runs import NoteRunConfig
 from .semantic import (MIN_CTC_MEDIAN_SCORE, contextual_non_lyric_template_families,
                        credit_recovery_windows, has_melodic_support,
-                       is_credit_hallucination, non_lyric_template_family)
+                       is_credit_hallucination, is_latin_lyric_text,
+                       non_lyric_template_family)
 from .vocal_activity import VocalActivity
 
 
@@ -106,7 +107,9 @@ class AudioAdapters:
     ``lyric_reading`` optionally supplies linguistic readings for whole-line
     comparison (otherwise normalized surface text is used). ``lyric_recoverer``
     can retry one singing window when Whisper emits a credit template. The
-    reading, mora, and melody adapters are required in both modes.
+    optional ``template_lyric_recoverer`` retries template spans without a fixed
+    recognition language. The reading, mora, and melody adapters are required
+    in both modes.
     """
 
     reading_selector: ReadingSelector
@@ -129,6 +132,7 @@ class AudioAdapters:
     supplied_reading_selector: Callable[
         [Path, Sequence[LyricLine], Sequence[str | None]], Sequence[ReadingSelection]
     ] | None = None
+    template_lyric_recoverer: LyricRecoverer | None = None
 
 
 class AudioPipelineError(RuntimeError):
@@ -500,7 +504,47 @@ def analyze_audio(
                                             for line in raw_recognized)))
         if len(activity) != len(raw_recognized):
             raise AudioPipelineError("vocal activity", "one result is required per line")
+    retried_through = replaced_through = -1
     for index, (line, family) in enumerate(zip(raw_recognized, template_families, strict=True)):
+        if index <= replaced_through:
+            continue
+        if (lyrics is None and family is not None and index > retried_through
+                and adapters.template_lyric_recoverer is not None):
+            last = index + 1
+            while last < len(raw_recognized) and template_families[last] is not None:
+                last += 1
+            retried_through = last - 1
+            block = raw_recognized[index:last]
+            start, end = block[0].start_sec, block[-1].end_sec
+            if any(has_melodic_support(item, notes) for item in block):
+                if on_progress:
+                    on_progress("歌詞の誤認識区間を言語指定なしで再確認しています")
+                try:
+                    candidates = _validate_lines(
+                        adapters.template_lyric_recoverer(path, start, end), timed=True,
+                    )
+                except Exception:
+                    candidates = ()
+                if candidates and all(
+                    start <= item.start_sec < item.end_sec <= end
+                    and is_latin_lyric_text(item.text)
+                    and non_lyric_template_family(item.text) is None
+                    and not is_pathological_repeated_vocalization(item, notes)
+                    and readable(item.text) and has_melodic_support(item, notes)
+                    for item in candidates
+                ):
+                    recognized_lines.extend(candidates)
+                    replaced_through = last - 1
+                    semantic_evidence.append(Evidence(
+                        f"audio-template-language-{index}", "soramimic_score.semantic",
+                        "lyric-language-recovery", 0.,
+                        {"source_segment_indices": list(range(index, last)),
+                         "source_surfaces": [item.text for item in block],
+                         "window": [start, end], "recognition_language": "auto",
+                         "status": "recovered", "recovered_count": len(candidates),
+                         "confidence_available": False},
+                    ))
+                    continue
         if (lyrics is None and is_pathological_repeated_vocalization(line, notes)):
             semantic_evidence.append(Evidence(
                 f"audio-repetition-runaway-{index}", "soramimic_score.local_recovery",

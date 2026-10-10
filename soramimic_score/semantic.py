@@ -42,6 +42,8 @@ _SOFT_TEMPLATES = (
     ("channel-registration", re.compile(
         r"チャンネル登録(?:と高評価)?(?:を)?(?:よろしく)?"
         r"(?:お願いします|お願いいたします|ありがとう(?:ございます|ございました))")),
+    ("viewing-thanks", re.compile(r"(?:thankyou|thanks)for(?:watching|listening)")),
+    ("channel-registration", re.compile(r"(?:please)?subscribe(?:tomy|toour|tothe)?channel")),
 )
 _STOCK_MEDIA = re.compile(
     r"(?:🐯?soundhodori사운드호돌이サウンドゥ?ホドリ|instagramtwitterホドリ)"
@@ -55,6 +57,13 @@ def normalize_recognized_text(text: str) -> str:
     normalized = unicodedata.normalize("NFKC", text).casefold()
     return "".join(char for char in normalized
                    if unicodedata.category(char)[0] not in {"P", "Z"})
+
+
+def is_latin_lyric_text(text: str) -> bool:
+    """Recognize a Latin-script retry without treating Japanese text as English."""
+    letters = [char for char in unicodedata.normalize("NFKC", text) if char.isalpha()]
+    return bool(letters) and all(unicodedata.name(char, "").startswith("LATIN ")
+                                 for char in letters)
 
 
 def non_lyric_template_family(text: str) -> str | None:
