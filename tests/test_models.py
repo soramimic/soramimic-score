@@ -231,6 +231,51 @@ class ModelTests(unittest.TestCase):
                                           "condition_on_previous_text": False,
                                           "temperature": 0.0}), calls)
 
+    def test_template_retry_detects_language_and_preserves_local_clock(self):
+        calls = []
+        class Whisper:
+            def __init__(self, *_args, **_kwargs):
+                pass
+            def transcribe(self, samples, **options):
+                calls.append(options)
+                return iter([SimpleNamespace(text=" Follow the light ", start=.2, end=.7)]), None
+        with patch.dict(sys.modules, {
+            "faster_whisper": SimpleNamespace(WhisperModel=Whisper),
+            "librosa": SimpleNamespace(load=lambda *_args, **_kwargs: ([0.] * 32000, 16000)),
+        }), patch("soramimic_score.models._release"):
+            lines = create_adapters(self.config).template_lyric_recoverer(
+                self.root / "audio.wav", 10, 12)
+        self.assertEqual(lines, (LyricLine("Follow the light", 10.2, 10.7),))
+        self.assertIsNone(calls[0]["language"])
+        self.assertFalse(calls[0]["condition_on_previous_text"])
+        self.assertEqual(calls[0]["temperature"], 0.)
+
+    def test_shared_template_retry_requires_explicit_language_detection_acknowledgment(self):
+        calls = []
+        class Shared:
+            def run(self, kind, audio, parameters):
+                calls.append(parameters)
+                return response
+
+        response = {"requested_language": None, "requested_temperature": 0.,
+                    "lines": [{"text": "Follow the light", "start_sec": .2, "end_sec": .7}]}
+        with patch.dict(sys.modules, {
+            "librosa": SimpleNamespace(load=lambda *_args, **_kwargs: ([0.] * 32000, 16000)),
+            "soundfile": SimpleNamespace(write=lambda path, *_args, **_kwargs:
+                                         Path(path).write_bytes(b"window")),
+        }):
+            adapters = create_adapters(self.config, shared=Shared())
+            self.assertEqual(adapters.template_lyric_recoverer(self.root / "audio.wav", 10, 12),
+                             (LyricLine("Follow the light", 10.2, 10.7),))
+            self.assertIsNone(calls[0]["language"])
+            for rejected in ({"requested_language": "ja", "requested_temperature": 0.},
+                             {"requested_temperature": 0.},
+                             {"requested_language": None}):
+                with self.subTest(rejected=rejected):
+                    response = rejected | {"lines": []}
+                    with self.assertRaisesRegex(RuntimeError, "settings are unsupported"):
+                        adapters.template_lyric_recoverer(self.root / "audio.wav", 10, 12)
+
     @unittest.skipUnless(importlib.util.find_spec("soramimic_yomi") and importlib.util.find_spec("MeCab"),
                          "audio dependencies not installed")
     def test_real_pronunciation_uses_yomi_and_handles_english(self):
