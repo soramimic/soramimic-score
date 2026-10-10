@@ -11,7 +11,7 @@ from threading import Lock
 import unicodedata
 
 from .audio import LyricLine, ReadingSelection
-from .japanese import _RUBY, kana_to_moras, katakana, mora_vowel
+from .japanese import _RUBY, kana_to_moras, katakana, mora_vowel, normalize_reading
 
 
 _YOMI_LOCK = Lock()
@@ -82,9 +82,10 @@ def _node_reading(node):
                 pronunciation = fields[9] if len(fields) > 9 else "*"
                 if pronunciation in {"", "*"}:
                     pronunciation = katakana(node.surface)
-                kana = "".join(kana_to_moras(pronunciation))
-                if not kana or kana != katakana(pronunciation):
-                    raise ValueError(f"Cannot determine Japanese pronunciation: {node.surface!r}")
+                try:
+                    kana = normalize_reading(pronunciation)
+                except ValueError as exc:
+                    raise ValueError(f"Cannot determine Japanese pronunciation: {node.surface!r}") from exc
                 parts.append(kana)
                 surfaces.append(node.surface)
         node = node.next
@@ -140,9 +141,10 @@ def dictionary_readings(_path, lines, *, automatic=False):
                     parts.append(dictionary_readings(_path, (replace(line, text=plain),),
                                                      automatic=automatic)[0].candidates)
                 if match is not None:
-                    kana = katakana(match[2])
-                    if not kana or "".join(kana_to_moras(kana)) != kana:
-                        raise ValueError("Explicit ruby must contain a kana pronunciation")
+                    try:
+                        kana = normalize_reading(match[2])
+                    except ValueError as exc:
+                        raise ValueError(f"Explicit ruby must contain a kana pronunciation: {exc}") from exc
                     parts.append((kana,))
                     cursor = match.end()
             # Bound the combinatorial generator by order, never by mora count.
@@ -156,8 +158,9 @@ def dictionary_readings(_path, lines, *, automatic=False):
         with _YOMI_LOCK:
             yomi_candidates = get_yomi_candidates(line.text, nbest=32)
         for candidate in yomi_candidates:
-            kana = katakana(candidate.reading)
-            if not kana or "".join(kana_to_moras(kana)) != kana:
+            try:
+                kana = normalize_reading(candidate.reading)
+            except ValueError:
                 continue
             entry = provenance.setdefault(kana, {
                 "kana": kana, "sources": ["soramimic-yomi"], "yomi_candidates": [],

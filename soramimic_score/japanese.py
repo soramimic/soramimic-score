@@ -87,6 +87,10 @@ _IRREGULAR = {"シ": "sh", "チ": "ch", "ツ": "ts", "フ": "f", "ジ": "j", "�
 _SMALL_VOWELS = {"ァ": "a", "ィ": "i", "ゥ": "u", "ェ": "e", "ォ": "o",
                   "ャ": "a", "ュ": "u", "ョ": "o", "ヮ": "a"}
 _STANDALONE_SMALL_KANA = str.maketrans("ァィゥェォャュョヮヵヶ", "アイウエオヤユヨワカケ")
+_READING_ALIASES = str.maketrans({
+    "ヰ": "イ", "ヱ": "エ", "ヷ": "ヴァ", "ヸ": "ヴィ", "ヹ": "ヴェ", "ヺ": "ヴォ",
+})
+_READING_MARKS = str.maketrans({"゛": "\u3099", "゜": "\u309a", "ゝ": "ヽ", "ゞ": "ヾ"})
 
 
 def phonemes_for_mora(mora: str, previous_vowel: str | None = None) -> tuple[str, ...]:
@@ -115,6 +119,42 @@ def phonemes_for_mora(mora: str, previous_vowel: str | None = None) -> tuple[str
     return tuple(value for value in (consonant, vowel) if value)
 
 
+def normalize_reading(reading: str) -> str:
+    """Normalize a generated kana reading, rejecting unresolved characters.
+
+    Apply after G2P, never to lyric spelling. Width, script, voicing marks,
+    whitespace, historical kana and kana iteration marks have explicit rules.
+    All retained moras must be pronounceable; unknown text is never filtered
+    out to make a partly readable candidate appear complete.
+    """
+    if not isinstance(reading, str):
+        raise ValueError("reading must be a string containing kana")
+    compact = "".join(char for char in reading if not char.isspace())
+    # Compose again after hiragana -> katakana (わ + combining dakuten -> ヷ).
+    kana = unicodedata.normalize("NFC", katakana(compact.translate(_READING_MARKS)))
+    expanded: list[str] = []
+    for index, char in enumerate(kana):
+        if char in "ヽヾ":
+            previous = expanded[-1] if expanded else ""
+            base = unicodedata.normalize("NFD", previous)[:1]
+            if base not in _BASE and base not in {"ヰ", "ヱ"}:
+                raise ValueError(f"kana iteration mark has no repeatable base at position {index + 1}")
+            char = unicodedata.normalize("NFC", base + ("\u3099" if char == "ヾ" else ""))
+            if len(char) != 1:
+                raise ValueError(f"kana iteration mark cannot voice its base at position {index + 1}")
+        expanded.append(char)
+    normalized = "".join(expanded).translate(_READING_ALIASES)
+    if not normalized:
+        raise ValueError("reading must contain a kana pronunciation")
+    for index, char in enumerate(normalized):
+        if char not in _BASE and char not in SMALL_KANA and char not in SPECIAL_MORAS:
+            raise ValueError(f"unsupported character in kana reading at position {index + 1}: "
+                             f"{char!r} (U+{ord(char):04X})")
+    for mora in kana_to_moras(normalized):
+        phonemes_for_mora(mora)
+    return normalized
+
+
 def mora_vowel(mora: str, previous_vowel: str | None = None) -> str | None:
     phonemes = phonemes_for_mora(mora, previous_vowel)
     value = phonemes[-1]
@@ -139,7 +179,12 @@ G2P = Callable[[str], Sequence[ReadingCandidate]]
 
 def simple_kana_reading(surface: str) -> tuple[ReadingCandidate, ...]:
     """Fallback for kana-only spans; callers may supply a morphological G2P."""
-    kana = "".join(kana_to_moras(surface))
+    # Punctuation separates a kana-only lyric; non-kana words need a real G2P.
+    try:
+        kana = normalize_reading("".join(char for char in surface
+                                        if not unicodedata.category(char).startswith("P")))
+    except ValueError:
+        return ()
     # An isolated grammatical particle is unambiguous even without a tokenizer.
     # Embedded particles are deliberately left to a morphological G2P callback.
     kana = {"ハ": "ワ", "ヘ": "エ", "ヲ": "オ"}.get(kana, kana)
@@ -162,7 +207,7 @@ def spans_from_ruby_text(marked_text: str, g2p: G2P = simple_kana_reading) -> tu
             return
         unique: dict[str, ReadingCandidate] = {}
         for candidate in candidates:
-            kana = "".join(kana_to_moras(candidate.kana))
+            kana = normalize_reading(candidate.kana)
             if not kana or not candidate.source or not 0 <= candidate.score <= 1:
                 raise ValueError("G2P candidates need kana, source, and a score in [0, 1]")
             normalized = ReadingCandidate(kana, candidate.source, candidate.score,

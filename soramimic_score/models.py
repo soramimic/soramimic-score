@@ -12,7 +12,7 @@ import tempfile
 
 from .audio import (AudioAdapters, AlignedMora, CTCWindowCapacityError,
                     LyricLine, MelodyNote)
-from .audio import _run_adapter
+from .audio import _run_adapter, _validate_readings
 from .acoustic import (KANA_MODEL, release_memory as _release, separate_vocals,
                        transcribe_kana_views, transcribe_whisper_views)
 from .japanese import kana_to_moras, katakana
@@ -23,6 +23,16 @@ from .readings import (dictionary_readings, grouped_acoustic_windows,
 from .symbol_readings import symbol_slots, symbol_reading_proposals, refine_symbol_reading
 
 logger = logging.getLogger(__name__)
+
+
+def _ctc_token_id(char, token_ids):
+    """Use full-size aliases for kana absent from the standard CTC vocabulary."""
+    if char in token_ids:
+        return token_ids[char]
+    alias = {"ヮ": "ワ", "ヵ": "カ"}.get(char)
+    if alias is not None and alias in token_ids:
+        return token_ids[alias]
+    raise ValueError(f"CTC vocabulary does not support {char!r}")
 
 
 def _transcribe_shared_kana(shared, source: Path, windows):
@@ -241,6 +251,8 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
     emission_cache = {}
 
     def align(path, lines, readings):
+        readings = _validate_readings(lines, readings)
+        moras = [kana_to_moras(reading.kana) for reading in readings]
         logger.info("発音時刻を推定しています")
         import torch
         import torchaudio.functional as taf
@@ -257,6 +269,13 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
                 raise ValueError("Audio must contain finite samples")
             processor = AutoProcessor.from_pretrained(config.ctc_model,
                                                       local_files_only=config.local_files_only)
+            vocab = processor.tokenizer.get_vocab()
+            available = {katakana(char): index for char, index in vocab.items()}
+            # Report incompatible custom vocabularies before expensive inference.
+            for row in moras:
+                for mora in row:
+                    for char in mora:
+                        _ctc_token_id(char, available)
             model = Wav2Vec2ForCTC.from_pretrained(config.ctc_model,
                                                   local_files_only=config.local_files_only).eval().to(config.device)
             try:
@@ -276,7 +295,6 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
                     hi = min(len(chunk), lo + 320000 // stride)
                     logits.append(chunk[lo:hi])
                 probs = torch.log_softmax(torch.cat(logits), dim=-1)
-                vocab = processor.tokenizer.get_vocab()
                 blank = model.config.pad_token_id
                 # Both scripts denote the same acoustic token; combine their mass.
                 aliases = {}
@@ -303,7 +321,6 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
         stride = emission_cache["stride"]
         token_ids = emission_cache["token_ids"]
         blank = emission_cache["blank"]
-        moras = [kana_to_moras(reading.kana) for reading in readings]
         timed = all(line.start_sec is not None for line in lines)
         groups = ([([index], line.start_sec, line.end_sec)
                    for index, line in enumerate(lines)] if timed
@@ -316,9 +333,7 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
             for li in indices:
                 for mi, mora in enumerate(moras[li]):
                     for char in mora:
-                        if char not in token_ids:
-                            raise ValueError(f"CTC vocabulary does not support {char!r}")
-                        targets.append(token_ids[char])
+                        targets.append(_ctc_token_id(char, token_ids))
                         owners.append((li, mi))
             required = len(targets) + sum(a == b for a, b in zip(targets, targets[1:]))
             if not targets or hi - lo < required:

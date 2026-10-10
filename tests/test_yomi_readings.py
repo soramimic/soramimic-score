@@ -40,6 +40,29 @@ class YomiReadingsTests(unittest.TestCase):
             selection, = dictionary_readings(None, (LyricLine("やった"),), automatic=True)
         self.assertEqual(selection.kana, "ヤッタ")
 
+    def test_dictionary_normalizes_candidates_before_acoustic_selection(self):
+        self.yomi.return_value = [Candidate("ｶﾞ"), Candidate("ヰ"),
+                                 Candidate("カ★ナ"), Candidate("ヌ\u3099")]
+        with patch("soramimic_score.readings.dictionary_candidates",
+                   return_value=(("ガ", "エ"),)):
+            selected, = dictionary_readings(None, (LyricLine("声"),))
+        self.assertEqual(selected.candidates, ("ガ", "イ", "エ"))
+        provenance = selected.detail["candidate_provenance"]
+        self.assertEqual(provenance[0]["yomi_candidates"][0]["reading"], "ｶﾞ")
+        self.assertEqual(provenance[0]["sources"], ["soramimic-yomi", "unidic-lite"])
+
+    def test_unreadable_candidates_cannot_leave_a_partial_reading(self):
+        self.yomi.return_value = [Candidate("カ★ナ"), Candidate("ヌ\u3099")]
+        with patch("soramimic_score.readings.dictionary_candidates", side_effect=ValueError):
+            with self.assertRaisesRegex(ValueError, "Neither"):
+                dictionary_readings(None, (LyricLine("声"),))
+
+    def test_ruby_normalizes_voicing_and_rejects_mixed_unknown_text(self):
+        selected, = dictionary_readings(None, (LyricLine("｜声《ｶﾞゐ》"),))
+        self.assertEqual(selected.kana, "ガイ")
+        with self.assertRaisesRegex(ValueError, "kana pronunciation.*U\\+2605"):
+            dictionary_readings(None, (LyricLine("｜声《カ★ナ》"),))
+
     @unittest.skipUnless(importlib.util.find_spec("MeCab"), "audio dependencies not installed")
     def test_alternate_word_segmentation_keeps_imayoru(self):
         candidates, = dictionary_candidates((LyricLine("二人今夜に駆け出してく"),))

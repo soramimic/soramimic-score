@@ -54,6 +54,7 @@ from .japanese import (
     kana_to_moras,
     kana_to_syllables,
     mora_distance,
+    normalize_reading,
     phonemes_for_mora,
     spans_from_ruby_text,
 )
@@ -129,6 +130,7 @@ __all__ = [
     "expand_repeated_vocalizations",
     "from_linked_observations",
     "kana_to_moras",
+    "normalize_reading",
     "kana_to_syllables",
     "mora_distance",
     "load",
