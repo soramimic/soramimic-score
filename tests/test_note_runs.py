@@ -90,6 +90,30 @@ def preserving_config(**changes):
 
 
 class NoteRunOptimizationTests(unittest.TestCase):
+    def test_attached_pitch_change_is_not_treated_as_detached_phrase_edge(self):
+        source = document("カ", (0.05,), (
+            note("body", 0, .3), note("tail", .3, .5, 65),
+            note("detached", 1.5, 1.7, 67),
+        ))
+        result = optimize_note_runs(source)
+        self.assertEqual([n.source_note_ids for n in result.assignments[0].notes],
+                         [("body",), ("tail",)])
+        self.assertEqual(result.omitted_source_note_ids, ("detached",))
+        self.assertFalse(result.omitted_mora_ids)
+
+    def test_ctc_posterior_floor_does_not_pull_lyrics_to_early_notes(self):
+        source = multiline_document(("カキク",), (.05, .31, .34), (
+            note("first", 0, .3), note("middle", .3, .6),
+            note("last", .6, .9, 65),
+        ), confidences=(.1, .1, 1e-8))
+        result = optimize_note_runs(source)
+        self.assertEqual([a.kana for a in result.assignments], ["カ", "キ", "ク"])
+        self.assertEqual(result.assignments[-1].notes[0].source_note_ids, ("last",))
+        self.assertEqual(result.assignments[-1].cost.ctc_onset_distance, 0)
+        self.assertFalse(result.omitted_mora_ids)
+        self.assertFalse(result.omitted_source_note_ids)
+        self.assertEqual(source.evidence[-1].confidence, 1e-8)
+
     def test_whisper_ownership_prevents_fully_external_note_steal(self):
         source = multiline_document(
             ("カ", "キ"), (0.98, 1.20),
@@ -315,7 +339,7 @@ class NoteRunOptimizationTests(unittest.TestCase):
         self.assertGreater(same.cost.segment_rest, 0)
         self.assertEqual(separate.cost.segment_rest, 0)
 
-    def test_confidences_and_singing_intervals_are_not_score_inputs(self):
+    def test_usable_confidences_and_singing_intervals_do_not_rescale_cost(self):
         original = document("カキ", (0.1, 0.4), (
             note("n0", 0.1, 0.3), note("n1", 0.4, 0.6),
         ))
