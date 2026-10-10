@@ -23,7 +23,7 @@ soramimic-score = "soramimic_score.__main__:main"
 web = ["fastapi>=0.115,<1", "uvicorn>=0.30,<1", "python-multipart>=0.0.9,<1"]
 test = ["httpx>=0.27,<1"]
 audio = [
-  "soramimic-yomi @ git+https://github.com/soramimic/soramimic-yomi@e9542850a49a8c424ba6685ca6814dcbb5b139a9",
+  "soramimic-yomi @ git+https://github.com/soramimic/soramimic-yomi@c1fbee3b49ceac19567d96c82b405026e66029a2",
   "demucs==4.0.1",
   "faster-whisper>=1.0,<2",
   "torch>=2.2,<2.9",
