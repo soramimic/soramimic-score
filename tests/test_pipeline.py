@@ -56,8 +56,7 @@ class PipelineTests(unittest.TestCase):
             pitch_change_weight=.3,
             source_note_split_weight=.3,
             mora_omission_weight=20,
-            internal_note_only_open_weight=10,
-            edge_note_only_open_weight=10,
+            note_only_open_weight=10,
             note_only_duration_weight=10,
             within_syllable_rest_open_weight=1,
             within_syllable_rest_duration_weight=1,
@@ -334,7 +333,7 @@ class PipelineTests(unittest.TestCase):
             doc,
             config=NoteRunConfig(
                 mora_omission_weight=.01,
-                edge_note_only_open_weight=0,
+                note_only_open_weight=0,
                 note_only_duration_weight=0,
             ),
             line_windows_by_utterance={"u0": (0, .9)},
@@ -423,7 +422,7 @@ class PipelineTests(unittest.TestCase):
         config = replace(
             self.preserving_config(),
             mora_omission_weight=.1,
-            edge_note_only_open_weight=0,
+            note_only_open_weight=0,
             note_only_duration_weight=0,
         )
         run = run_stage3_document(doc, config=config)
