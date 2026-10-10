@@ -137,26 +137,49 @@ def dictionary_readings(_path, lines, *, automatic=False):
             "original_text": line.text, "normalized_text": text,
         }} if text != line.text else {})
         if _RUBY.search(line.text):
+            from .inferred_readings import inferred_candidates, inferred_reading_slots
+
             parts = []
+            part_selections = []
+            inferred_slots = []
+            kana_offset = 0
             cursor = 0
             for match in [*_RUBY.finditer(line.text), None]:
                 end = match.start() if match is not None else len(line.text)
                 plain = line.text[cursor:end]
                 if any(not c.isspace() and unicodedata.category(c)[0] not in "PZC"
                        for c in plain):
-                    parts.append(dictionary_readings(_path, (replace(line, text=plain),),
-                                                     automatic=automatic)[0].candidates)
+                    selected, = dictionary_readings(_path, (replace(line, text=plain),),
+                                                    automatic=automatic)
+                    parts.append(selected.candidates)
+                    part_selections.append(selected)
+                    for slot in inferred_reading_slots(plain, selected):
+                        inferred_slots.append({**slot,
+                            "start": cursor + slot["start"], "end": cursor + slot["end"],
+                            "kana_start": (kana_offset + slot["kana_start"]
+                                           if slot["mapped"] else None),
+                            "kana_end": (kana_offset + slot["kana_end"]
+                                         if slot["mapped"] else None)})
+                    kana_offset += len(selected.kana)
                 if match is not None:
                     try:
                         kana = normalize_reading(match[2])
                     except ValueError as exc:
                         raise ValueError(f"Explicit ruby must contain a kana pronunciation: {exc}") from exc
                     parts.append((kana,))
+                    part_selections.append(ReadingSelection(kana, "explicit-ruby", 1., (kana,)))
+                    kana_offset += len(kana)
                     cursor = match.end()
             # Bound the combinatorial generator by order, never by mora count.
-            candidates = tuple(dict.fromkeys("".join(row) for row in islice(product(*parts), 32)))
+            rows = tuple(islice(product(*parts), 32))
+            candidates = tuple(dict.fromkeys("".join(row) for row in rows))
+            inferred = ["".join(row) for row in rows
+                        if any(kana in inferred_candidates(part)
+                               for kana, part in zip(row, part_selections, strict=True))]
             output.append(ReadingSelection(candidates[0], "explicit-ruby", 1.0, candidates, {
                 "reason": "supplied-ruby", "confidence_available": False,
+                "inferred_candidates": list(dict.fromkeys(inferred)),
+                "mapped_inferred_spans": inferred_slots,
                 **input_detail,
             }))
             continue
@@ -319,11 +342,13 @@ def _substring_distance(candidate, evidence):
     return min(previous)
 
 
-def select_acoustic_reading(candidates, transcripts):
+def select_acoustic_reading(candidates, transcripts, *, inferred_candidates=()):
     """Change the dictionary choice only when available audio views agree.
 
     The 1.0 score is a selection prior, not a calibrated acoustic probability.
     Alternative readings and raw distances are retained as evidence.
+    A spelling-model guess has no tie preference over an equally supported
+    dictionary, rule, or local acoustic candidate.
     """
     if not candidates:
         raise ValueError("At least one dictionary candidate is required")
@@ -346,14 +371,30 @@ def select_acoustic_reading(candidates, transcripts):
             row = {view: None for view in evidence}
         distances.append(row)
     detail["distances"] = distances
+    inferred = frozenset(inferred_candidates)
+    if inferred:
+        detail["inferred_candidates"] = [candidate for candidate in candidates
+                                          if candidate in inferred]
     selected = 0
     if evidence and all(value is not None for value in distances[0].values()):
         totals = [sum(row.values()) if all(value is not None for value in row.values())
                   else math.inf for row in distances]
-        best = min(range(len(candidates)), key=lambda index: totals[index])
-        tied = sum(math.isclose(total, totals[best], abs_tol=1e-9) for total in totals) > 1
+        minimum = min(totals)
+        matches = [index for index, total in enumerate(totals)
+                   if math.isclose(total, minimum, abs_tol=1e-9)]
+        supported = [index for index in matches if candidates[index] not in inferred]
+        preferred = supported or matches
+        best = preferred[0]
+        tied = len(preferred) > 1
         detail["reason"] = "dictionary-supported"
-        if tied:
+        if candidates[0] in inferred and best != 0 and totals[best] <= totals[0] + 1e-9:
+            gains = [distances[0][view] - distances[best][view] for view in evidence]
+            if min(gains) >= -1e-9:
+                selected = best
+                detail["reason"] = "acoustic-over-inferred"
+            else:
+                detail["reason"] = "conflicting-evidence"
+        elif tied:
             detail["reason"] = "ambiguous-evidence"
         elif best != 0:
             gains = [distances[0][view] - distances[best][view] for view in evidence]

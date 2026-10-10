@@ -20,6 +20,8 @@ from .parenthetical import (choose_reading, reading_options, resolved_text,
                             selection_detail)
 from .readings import (dictionary_readings, grouped_acoustic_windows,
                        select_acoustic_reading, token_reading_proposals)
+from .inferred_readings import (inferred_acoustic_windows, inferred_candidates,
+                                inferred_reading_proposals, inferred_reading_slots)
 from .symbol_readings import symbol_slots, symbol_reading_proposals, refine_symbol_reading
 
 logger = logging.getLogger(__name__)
@@ -428,11 +430,13 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
         candidates = tuple(reading.candidates for reading in defaults)
         slots = tuple(symbol_slots(line.text, defaults[index].kana)
                       for index, line in enumerate(lines))
+        inferred_slots = tuple(inferred_reading_slots(line.text, defaults[index])
+                               for index, line in enumerate(lines))
         potential = (tuple(token_reading_proposals(line.text, candidates[index][0])
                            for index, line in enumerate(lines)) if automatic else
                      ((),) * len(lines))
         ambiguous = [index for index, row in enumerate(candidates)
-                     if len(row) > 1 or potential[index] or slots[index]
+                     if len(row) > 1 or potential[index] or slots[index] or inferred_slots[index]
                      or any(choice["status"] == "unresolved" for choice in decisions[index])]
         if not ambiguous:
             return finish(defaults)
@@ -449,6 +453,18 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
         duration = librosa.get_duration(path=str(path))
         windows, assignments = grouped_acoustic_windows(
             line_windows, ambiguous if any(options) else range(len(lines)), duration)
+        windows = list(windows)
+        inferred_assignments = {}
+        for index in ambiguous:
+            if not inferred_slots[index]:
+                continue
+            local = []
+            for window in inferred_acoustic_windows(line_windows, index, duration):
+                if window not in windows:
+                    windows.append(window)
+                local.append(windows.index(window))
+            inferred_assignments[index] = tuple(local)
+        windows = tuple(windows)
         paths = {"mix": path}
         if vocals_path is not None:
             paths["vocals"] = vocals_path
@@ -472,6 +488,8 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
             candidates = tuple(reading.candidates for reading in defaults)
             slots = tuple(symbol_slots(line.text, defaults[index].kana)
                           for index, line in enumerate(lines))
+            inferred_slots = tuple(inferred_reading_slots(line.text, defaults[index])
+                                   for index, line in enumerate(lines))
         symbol_windows = sorted({i for index in ambiguous if slots[index]
                                  for i in assignments[index]})
         lexical = (transcribe_whisper_views(paths, [windows[i] for i in symbol_windows],
@@ -479,7 +497,8 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
         lexical_indices = {original: local for local, original in enumerate(symbol_windows)}
         result = list(defaults)
         for index in ambiguous:
-            if len(candidates[index]) == 1 and not potential[index] and not slots[index]:
+            if (len(candidates[index]) == 1 and not potential[index] and not slots[index]
+                    and not inferred_slots[index]):
                 continue
             views = {view: "".join(rows[i] for i in assignments[index])
                      for view, rows in transcripts.items()}
@@ -488,8 +507,15 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
                 if automatic and potential[index] else ())
             symbol_proposals, symbol_evidence = symbol_reading_proposals(
                 defaults[index].kana, slots[index], views)
-            choices = tuple(dict.fromkeys((*candidates[index], *proposals, *symbol_proposals)))
-            selection = select_acoustic_reading(choices, views)
+            inferred_proposals, inferred_evidence = inferred_reading_proposals(
+                defaults[index].kana, inferred_slots[index], {
+                    view: "".join(rows[i] for i in inferred_assignments.get(index, ()))
+                    for view, rows in transcripts.items()
+                })
+            choices = tuple(dict.fromkeys((*candidates[index], *proposals, *symbol_proposals,
+                                          *inferred_proposals)))
+            selection = select_acoustic_reading(
+                choices, views, inferred_candidates=inferred_candidates(defaults[index]))
             if slots[index]:
                 whisper_views = {
                     view: "".join(rows[lexical_indices[i]] for i in assignments[index])
@@ -511,6 +537,11 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
             result[index] = replace(selection, detail={
                 **defaults[index].detail, **selection.detail,
                 "dictionary_proposals": list(proposals),
+                "inferred_spans": list(inferred_slots[index]),
+                "inferred_proposals": list(inferred_proposals),
+                "inferred_evidence": list(inferred_evidence),
+                "inferred_windows_sec": [list(windows[i])
+                                         for i in inferred_assignments.get(index, ())],
                 "symbol_spans": list(slots[index]),
                 "symbol_proposals": list(symbol_proposals),
                 "symbol_evidence": list(symbol_evidence),

@@ -2186,7 +2186,7 @@ requires-dist = [
     { name = "pretty-midi", marker = "extra == 'audio'", specifier = ">=0.2.10" },
     { name = "python-multipart", marker = "extra == 'web'", specifier = ">=0.0.9,<1" },
     { name = "requests", specifier = ">=2.31,<3" },
-    { name = "soramimic-yomi", marker = "extra == 'audio'", git = "https://github.com/soramimic/soramimic-yomi?rev=e9542850a49a8c424ba6685ca6814dcbb5b139a9" },
+    { name = "soramimic-yomi", marker = "extra == 'audio'", git = "https://github.com/soramimic/soramimic-yomi?rev=c1fbee3b49ceac19567d96c82b405026e66029a2" },
     { name = "soundfile", marker = "extra == 'audio'", specifier = ">=0.12" },
     { name = "torch", marker = "extra == 'audio'", specifier = ">=2.2,<2.9" },
     { name = "torchaudio", marker = "extra == 'audio'", specifier = ">=2.2,<2.9" },
@@ -2199,7 +2199,7 @@ provides-extras = ["web", "test", "audio"]
 [[package]]
 name = "soramimic-yomi"
 version = "0.1.0"
-source = { git = "https://github.com/soramimic/soramimic-yomi?rev=e9542850a49a8c424ba6685ca6814dcbb5b139a9#e9542850a49a8c424ba6685ca6814dcbb5b139a9" }
+source = { git = "https://github.com/soramimic/soramimic-yomi?rev=c1fbee3b49ceac19567d96c82b405026e66029a2#c1fbee3b49ceac19567d96c82b405026e66029a2" }
 dependencies = [
     { name = "arpakana" },
     { name = "e2k" },
