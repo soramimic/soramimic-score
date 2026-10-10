@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from .japanese import katakana
+from .japanese import katakana, normalize_lyric_input
 
 
 _KANA = frozenset(chr(code) for code in range(0x3041, 0x3097)) | frozenset(
@@ -125,6 +125,11 @@ def ruby_segments(text: str, selected_kana: str) -> list[dict[str, str]]:
     """Keep selected readings while placing partial ruby like Video subtitles."""
     if not text:
         return []
+    normalized = normalize_lyric_input(text)
+    if normalized != text:
+        # Changed character counts need an explicit token-to-original map.
+        # Preserve the original display instead of guessing ruby boundaries.
+        return [{"text": text, "reading": ""}]
     try:
         from soramimic_yomi import get_tokens
         tokens = get_tokens(text, apply_rules=True)

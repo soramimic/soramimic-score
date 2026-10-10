@@ -7,7 +7,7 @@ from collections import Counter
 import math
 import re
 
-from .japanese import _RUBY, kana_to_moras, katakana
+from .japanese import _RUBY, kana_to_moras, katakana, normalize_lyric_input
 from .mora_gap import align_mora_gap
 
 
@@ -17,6 +17,7 @@ def symbol_slots(text, reading):
     Failure to map a span is retained as evidence.  It is never permission to
     rewrite the surrounding lexical reading.
     """
+    normalize_lyric_input(text)  # Symbol spans below stay in original coordinates.
     try:
         import soramimic_yomi as yomi
     except ImportError:
@@ -27,12 +28,16 @@ def symbol_slots(text, reading):
         return ()
     ruby = tuple((match.start(), match.end()) for match in _RUBY.finditer(text))
     output = []
-    for span in find(text):
+    # Spacing voicing marks belong to their kana, not to a neighboring symbol.
+    # Use combining marks for this scan only; one-for-one replacement preserves
+    # every original character offset (unlike composing the full G2P input).
+    symbol_text = text.translate(str.maketrans({"゛": "\u3099", "゜": "\u309a"}))
+    for span in find(symbol_text):
         if any(start <= span.start < end for start, end in ruby):
             continue
         with _YOMI_LOCK:
-            left = katakana(yomi.get_yomi(text[:span.start]))
-            right = katakana(yomi.get_yomi(text[span.end:]))
+            left = katakana(yomi.get_yomi(normalize_lyric_input(text[:span.start])))
+            right = katakana(yomi.get_yomi(normalize_lyric_input(text[span.end:])))
         mapped = (reading.startswith(left) and reading.endswith(right) and
                   len(left) + len(right) <= len(reading))
         output.append({**span.to_dict(), "mapped": mapped,
@@ -227,6 +232,7 @@ def _gap_readings(left, right, text):
 
 def _lexical_transcript(text):
     """Retain recognized token boundaries, without giving lyrics to Whisper."""
+    text = normalize_lyric_input(text)
     from soramimic_yomi import get_tokens, get_yomi
     from .readings import _YOMI_LOCK
     with _YOMI_LOCK:

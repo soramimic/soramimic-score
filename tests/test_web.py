@@ -86,6 +86,31 @@ class ScoreWebTests(unittest.TestCase):
                 self.assertEqual(self.submit().status_code, 200)
                 self.assertEqual(self.submit().status_code, 429)
 
+    def test_invalid_lyric_input_is_rejected_before_a_job_is_created(self):
+        for char in ("\0", "\x1b"):
+            with self.subTest(char=ascii(char)):
+                response = self.submit("か\u3099" + char + "くせい")
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("position 3", response.json()["detail"])
+                self.assertIn(f"U+{ord(char):04X}", response.json()["detail"])
+        self.assertEqual(self.received, [])
+        with sqlite3.connect(Path(self.temporary.name) / "jobs.sqlite3") as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 0)
+
+    def test_upload_keeps_original_lyric_spelling_for_analysis_and_storage(self):
+        source = "か\u3099くせい"
+        with patch.dict("os.environ", {"SORAMIMIC_SCORE_SHEETSAGE_MODEL": "a",
+                                      "SORAMIMIC_SCORE_SHEETSAGE_BASE": "b"}):
+            response = self.submit(source)
+            self.assertEqual(response.status_code, 200)
+            job = response.json()["id"]
+            for _ in range(100):
+                if self.client.get(f"/api/jobs/{job}").json()["state"] == "done":
+                    break
+                time.sleep(.02)
+        self.assertEqual(self.received, [("input.wav", (source,))])
+        self.assertEqual((Path(self.temporary.name) / job / "lyrics.txt").read_text(), source)
+
     def test_spoken_caption_uses_render_timing_with_estimated_provenance(self):
         from soramimic_score.document import from_linked_observations
         from soramimic_score.spoken import add_spoken_fallback

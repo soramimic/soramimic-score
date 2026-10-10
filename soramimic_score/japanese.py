@@ -93,6 +93,58 @@ _READING_ALIASES = str.maketrans({
 _READING_MARKS = str.maketrans({"゛": "\u3099", "゜": "\u309a", "ゝ": "ヽ", "ゞ": "ヾ"})
 
 
+def normalize_lyric_input(text: str) -> str:
+    """Prepare a copy for G2P without replacing the displayed lyric spelling.
+
+    Keep kanji, Latin letters, digits, punctuation and ruby delimiters. Only
+    kana width, voicing, iteration and ligature spellings are expanded here;
+    applying NFKC to the whole text would also change the ruby delimiter ｜.
+    Errors refer to one-based positions in the original string, before any
+    composition. Tabs and line breaks are allowed; other controls and lone
+    surrogates must never reach native reading engines.
+    """
+    if not isinstance(text, str):
+        raise ValueError("lyric input must be a string")
+    result: list[str] = []
+
+    def invalid(index: int, char: str, reason: str) -> None:
+        raise ValueError(f"{reason} in lyric input at position {index + 1}: "
+                         f"{char!r} (U+{ord(char):04X})")
+
+    for index, original in enumerate(text):
+        if (unicodedata.category(original) == "Cs"
+                or (unicodedata.category(original) == "Cc" and original not in "\t\n\r")):
+            invalid(index, original, "unsupported character")
+        char = (unicodedata.normalize("NFKC", original)
+                if "ｦ" <= original <= "ﾟ" else original)
+        char = {"゛": "\u3099", "゜": "\u309a", "ゟ": "より", "ヿ": "コト"}.get(char, char)
+        if char in {"\u3099", "\u309a"}:
+            previous = result[-1] if result else ""
+            if len(previous) != 1 or not ("ぁ" <= previous <= "ゖ" or "ァ" <= previous <= "ヶ"):
+                invalid(index, original, "voicing mark has no kana base")
+            voiced = unicodedata.normalize("NFC", previous + char)
+            if len(voiced) != 1:
+                # Hiragana わ/ゐ/ゑ/を have no precomposed voiced forms.
+                voiced = unicodedata.normalize("NFC", katakana(previous) + char)
+            if len(voiced) != 1:
+                invalid(index, original, "voicing mark cannot voice its base")
+            result[-1] = voiced
+        elif char in "ゝゞヽヾ":
+            previous = result[-1] if result else ""
+            base = unicodedata.normalize("NFD", previous)[:1]
+            if katakana(base) not in _BASE and base not in {"ゐ", "ゑ", "ヰ", "ヱ"}:
+                invalid(index, original, "kana iteration mark has no repeatable base")
+            repeated = unicodedata.normalize("NFC", base + ("\u3099" if char in "ゞヾ" else ""))
+            if len(repeated) != 1:
+                repeated = unicodedata.normalize("NFC", katakana(base) + "\u3099")
+            if len(repeated) != 1:
+                invalid(index, original, "kana iteration mark cannot voice its base")
+            result.append(repeated)
+        else:
+            result.extend(char)
+    return unicodedata.normalize("NFC", "".join(result).translate(_READING_ALIASES))
+
+
 def phonemes_for_mora(mora: str, previous_vowel: str | None = None) -> tuple[str, ...]:
     """Return a compact Japanese phoneme sequence for one retained mora."""
     mora = katakana(mora)
@@ -197,6 +249,7 @@ def spans_from_ruby_text(marked_text: str, g2p: G2P = simple_kana_reading) -> tu
     Non-ruby chunks are passed to ``g2p``. A ruby reading is a strong candidate,
     while distinct G2P alternatives are retained for later acoustic selection.
     """
+    normalize_lyric_input(marked_text)  # Validate original positions before splitting.
     spans: list[LyricSpan] = []
     plain_parts: list[str] = []
     plain_offset = 0
@@ -224,9 +277,9 @@ def spans_from_ruby_text(marked_text: str, g2p: G2P = simple_kana_reading) -> tu
 
     cursor = 0
     for match in _RUBY.finditer(marked_text):
-        add(marked_text[cursor:match.start()], g2p(marked_text[cursor:match.start()]))
+        add(marked_text[cursor:match.start()], g2p(normalize_lyric_input(marked_text[cursor:match.start()])))
         surface, ruby = match.groups()
-        add(surface, (ReadingCandidate(ruby, "explicit-ruby", 1.0), *g2p(surface)))
+        add(surface, (ReadingCandidate(ruby, "explicit-ruby", 1.0), *g2p(normalize_lyric_input(surface))))
         cursor = match.end()
-    add(marked_text[cursor:], g2p(marked_text[cursor:]))
+    add(marked_text[cursor:], g2p(normalize_lyric_input(marked_text[cursor:])))
     return "".join(plain_parts), tuple(spans)
