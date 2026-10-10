@@ -36,8 +36,7 @@ from .local_recovery import (adjacent_repeat_groups,
 from .note_runs import NoteRunConfig
 from .semantic import (MIN_CTC_MEDIAN_SCORE, contextual_non_lyric_template_families,
                        credit_recovery_windows, has_melodic_support,
-                       is_credit_hallucination, is_latin_lyric_text,
-                       non_lyric_template_family)
+                       is_credit_hallucination, non_lyric_template_family)
 from .vocal_activity import VocalActivity
 
 
@@ -527,7 +526,7 @@ def analyze_audio(
                     candidates = ()
                 if candidates and all(
                     start <= item.start_sec < item.end_sec <= end
-                    and is_latin_lyric_text(item.text)
+                    and any(char.isalpha() for char in item.text)
                     and non_lyric_template_family(item.text) is None
                     and not is_pathological_repeated_vocalization(item, notes)
                     and readable(item.text) and has_melodic_support(item, notes)

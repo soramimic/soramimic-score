@@ -240,6 +240,24 @@ class AudioPipelineTests(unittest.TestCase):
         self.assertEqual(recovery.detail["recognition_language"], "auto")
         self.assertEqual(recovery.detail["recovered_count"], 2)
 
+    def test_language_retry_accepts_japanese_mixed_and_non_latin_lyrics(self):
+        template = "ご視聴ありがとうございました"
+        for text in ("雲の先へ", "空へ fly", "다시 걸어"):
+            with self.subTest(text=text):
+                score = analyze_audio(self.audio, AudioAdapters(
+                    lambda _path, lines: tuple(ReadingSelection("ソラ", "test", 1)
+                                               for _ in lines),
+                    self._moras, self._melody,
+                    lambda _: (LyricLine(template, 0, .8),),
+                    lyric_reading=lambda _: "ソラ",
+                    template_lyric_recoverer=lambda *_: (LyricLine(text, 0, .8),),
+                ))
+                self.assertEqual(score.score.canonical_text, text)
+                self.assertTrue(score.score.synthesis_plan)
+                recovery = next(item for item in score.observations.evidence
+                                if item.kind == "lyric-language-recovery")
+                self.assertEqual(recovery.detail["source_surfaces"], [template])
+
     def test_language_retry_leaves_unsupported_or_template_alternatives_unchanged(self):
         template = "ご視聴ありがとうございました"
 
@@ -247,12 +265,12 @@ class AudioPipelineTests(unittest.TestCase):
             return tuple(ReadingSelection("ソラ", "test", 1) for _ in chosen)
 
         invalid_retries = (
-            (), (LyricLine(template, 0, .8),), (LyricLine("別の日本語", 0, .8),),
+            (), (LyricLine(template, 0, .8),),
             (LyricLine("Thank you for watching!", 0, .8),),
             (LyricLine("Follow the light", 0, .9),),
             (LyricLine("Follow the light", .7, .3),),
-            (LyricLine("Follow the light", 0, .4), LyricLine("日本語", .4, .8)),
-            (LyricLine("123", 0, .8),),
+            (LyricLine("雲の先へ", 0, .4), LyricLine(template, .4, .8)),
+            (LyricLine("123", 0, .8),), (LyricLine("♪…", 0, .8),),
         )
         baseline = analyze_audio(self.audio, AudioAdapters(
             readings, self._moras, self._melody,
