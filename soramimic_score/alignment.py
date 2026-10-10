@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from typing import Sequence
 
 from .ir import (Boundary, Evidence, IntermediateRepresentation, Mora, Phoneme,
                  Reading, SingingUnit, Utterance, VowelNucleus)
 from .japanese import (LyricSpan, kana_to_moras, kana_to_syllables,
-                       mora_distance, mora_vowel, phonemes_for_mora)
+                       mora_distance, mora_vowel, normalize_reading, phonemes_for_mora)
 
 
 @dataclass(frozen=True)
@@ -23,8 +23,10 @@ class ObservedSingingUnit:
     evidence_ids: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        if not self.moras or any(not kana_to_moras(value) for value in self.moras):
+        if not self.moras:
             raise ValueError("an observed unit needs explicit Japanese morae")
+        for value in self.moras:
+            normalize_reading(value)
         if not math.isfinite(self.confidence) or not 0 <= self.confidence <= 1:
             raise ValueError("observed confidence must be in [0, 1]")
         if self.end.time_sec < self.consonant_start.time_sec:
@@ -138,6 +140,11 @@ def build_known_lyrics_document(canonical_text: str, spans: Sequence[LyricSpan],
                                 observation_span_indices: Sequence[int] | None = None,
                                 ) -> IntermediateRepresentation:
     """Build schema v1 without deleting canonical units absent from the audio."""
+    spans = tuple(replace(span, reading_candidates=tuple(
+        replace(candidate, kana=normalize_reading(candidate.kana))
+        for candidate in span.reading_candidates)) for span in spans)
+    observations = tuple(replace(unit, moras=tuple(normalize_reading(value) for value in unit.moras))
+                         for unit in observations)
     if tuple(span.surface_span for span in spans) != tuple(sorted(span.surface_span for span in spans)):
         raise ValueError("lyric spans must be in surface order")
     if any(left.surface_span[1] > right.surface_span[0] for left, right in zip(spans, spans[1:])):

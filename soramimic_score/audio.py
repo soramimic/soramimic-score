@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 from .alignment import ObservedSingingUnit, build_known_lyrics_document
 from .document import ScoreDocument, compile_score
 from .ir import Boundary, Evidence, IntermediateRepresentation, NoteCandidate
-from .japanese import LyricSpan, ReadingCandidate, kana_to_moras, mora_vowel
+from .japanese import LyricSpan, ReadingCandidate, kana_to_moras, mora_vowel, normalize_reading
 from .line_windows import snap_line_windows_to_rests
 from .local_recovery import (adjacent_repeat_groups,
                              coalesce_repeated_suffix_fragments, deficit_windows,
@@ -198,22 +198,41 @@ def _validate_readings(
     result = tuple(readings)
     if len(result) != len(lines):
         raise AudioPipelineError("readings", "one reading is required for every lyric line")
-    for item in result:
-        if not item.source or not kana_to_moras(item.kana):
+    normalized = []
+    for index, item in enumerate(result):
+        if not item.source:
             raise AudioPipelineError("readings", "every reading needs kana and a source")
         _confidence(item.confidence, "readings")
-        if item.candidates and (item.kana not in item.candidates or any(
-            not kana or "".join(kana_to_moras(kana)) != kana for kana in item.candidates
-        )):
+        try:
+            kana = normalize_reading(item.kana)
+            candidates = tuple(dict.fromkeys(normalize_reading(value) for value in item.candidates))
+        except ValueError as exc:
+            raise AudioPipelineError("readings", f"line {index + 1}: {exc}") from exc
+        if candidates and kana not in candidates:
             raise AudioPipelineError("readings", "candidates must contain the selected kana reading")
-    return result
+        if kana != item.kana or candidates != item.candidates:
+            item = replace(item, kana=kana, candidates=candidates, detail={
+                **item.detail, "reading_normalization": {
+                    "selected_before": item.kana, "candidates_before": list(item.candidates),
+                },
+            })
+        normalized.append(item)
+    return tuple(normalized)
 
 
 def _validate_moras(
     readings: Sequence[ReadingSelection], aligned: Sequence[AlignedMora],
     *, unobserved_line_indices: Sequence[int] = (),
 ) -> tuple[AlignedMora, ...]:
-    result = tuple(aligned)
+    normalized = []
+    for item in aligned:
+        try:
+            kana = normalize_reading(item.kana)
+        except ValueError as exc:
+            raise AudioPipelineError("mora alignment",
+                                     f"line {item.line_index + 1}, mora {item.mora_index + 1}: {exc}") from exc
+        normalized.append(replace(item, kana=kana) if kana != item.kana else item)
+    result = tuple(normalized)
     unobserved = set(unobserved_line_indices)
     if any(type(index) is not int or not 0 <= index < len(readings) for index in unobserved):
         raise AudioPipelineError("mora alignment", "invalid unobserved lyric line")

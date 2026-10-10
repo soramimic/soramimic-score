@@ -13,13 +13,23 @@ import requests
 from soramimic_score import ModelConfig, LyricLine, analyze_audio, load
 from soramimic_score.audio import CTCWindowCapacityError
 from soramimic_score.__main__ import analyze_main
-from soramimic_score.models import (_transcribe_shared_kana, create_adapters,
+from soramimic_score.models import (_ctc_token_id, _transcribe_shared_kana, create_adapters,
                                     dictionary_readings, read_melody_lab)
 from soramimic_score.shared_inference import SharedInference
 from tests import test_audio_pipeline as fixtures
 
 
 class ModelTests(unittest.TestCase):
+    def test_ctc_aliases_require_an_available_sound_and_prefer_exact_tokens(self):
+        vocab = {"ワ": 1, "カ": 2, "ヮ": 3}
+        self.assertEqual(_ctc_token_id("ヮ", vocab), 3)
+        self.assertEqual(_ctc_token_id("ヮ", {"ワ": 1}), 1)
+        self.assertEqual(_ctc_token_id("ヵ", vocab), 2)
+        for char, vocabulary in (("ヮ", {"カ": 1}), ("★", vocab), ("ヵ", {})):
+            with self.subTest(char=char):
+                with self.assertRaisesRegex(ValueError, "CTC vocabulary"):
+                    _ctc_token_id(char, vocabulary)
+
     def test_shared_inference_preserves_worker_rejection_reason(self):
         class Response:
             def __init__(self, body, rejected=False):
@@ -274,6 +284,46 @@ class ModelTests(unittest.TestCase):
         path.touch()
         with self.assertRaisesRegex(ValueError, "not both"):
             analyze_audio(path, adapters=object(), model_config=self.config)
+
+    @unittest.skipUnless(importlib.util.find_spec("torch") and importlib.util.find_spec("librosa"),
+                         "audio dependencies not installed")
+    def test_ctc_missing_small_kana_keeps_mora_text_and_timing(self):
+        import numpy as np
+        import soundfile as sf
+        import torch
+        from soramimic_score import ReadingSelection
+
+        path = self.root / "small-kana.wav"
+        sf.write(path, np.zeros(16000), 16000)
+        class Processor:
+            tokenizer = SimpleNamespace(get_vocab=lambda: {"<pad>": 0, "ク": 1, "ワ": 2, "カ": 3})
+            def __call__(self, samples, **kwargs):
+                return SimpleNamespace(input_values=torch.tensor(samples).unsqueeze(0))
+        class Model:
+            config = SimpleNamespace(conv_stride=[320], pad_token_id=0)
+            def eval(self):
+                return self
+            def to(self, device):
+                return self
+            def __call__(self, values):
+                logits = torch.full((1, values.shape[1] // 320, 4), -10.)
+                logits[:, :, 0] = 0
+                for frame, token in ((30, 1), (40, 2), (50, 3)):
+                    logits[0, frame, token] = 10
+                return SimpleNamespace(logits=logits)
+        with patch("transformers.AutoProcessor.from_pretrained", return_value=Processor()), \
+             patch("transformers.Wav2Vec2ForCTC.from_pretrained", return_value=Model()) as factory:
+            align = create_adapters(self.config).mora_aligner
+            moras = align(path, (LyricLine("声", 0, 1),),
+                          (ReadingSelection("クヮヵ", "test", 1),))
+            self.assertEqual([m.kana for m in moras], ["クヮ", "ヵ"])
+            self.assertEqual([m.mora_index for m in moras], [0, 1])
+            self.assertAlmostEqual(moras[0].start_sec, .1)
+            self.assertAlmostEqual(moras[1].start_sec, .5)
+            with self.assertRaisesRegex(ValueError, "CTC vocabulary"):
+                create_adapters(self.config).mora_aligner(
+                    path, (LyricLine("声", 0, 1),), (ReadingSelection("ア", "test", 1),))
+            self.assertEqual(factory.call_count, 1)
 
     @unittest.skipUnless(importlib.util.find_spec("torch") and importlib.util.find_spec("librosa"),
                          "audio dependencies not installed")
