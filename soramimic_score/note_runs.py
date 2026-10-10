@@ -34,8 +34,7 @@ class NoteRunConfig:
     pitch_change_weight: float = 0.30469269715364344
     source_note_split_weight: float = 0.2971988578273897
     mora_omission_weight: float = 0.7357166836930735
-    internal_note_only_open_weight: float = 1.50
-    edge_note_only_open_weight: float = 0.05
+    note_only_open_weight: float = 1.50
     note_only_duration_weight: float = 0.75
     within_syllable_rest_open_weight: float = 1.00
     within_syllable_rest_duration_weight: float = 2.00
@@ -318,20 +317,12 @@ def _coalesce(
 
 def _note_only(
     notes: Sequence[NoteCandidate], position: str, config: NoteRunConfig,
-    *, previous_note: NoteCandidate | None = None,
 ) -> NoteOnlySpan | None:
     if not notes:
         return None
     duration = sum(note.end_sec - note.start_sec for note in notes)
-    # The inexpensive edge cost is for detached material, not a pitch-changing
-    # continuation immediately after the last sung note.
-    attached_tail = (position == "trailing" and previous_note is not None
-                     and notes[0].start_sec - previous_note.end_sec
-                     <= config.same_pitch_merge_gap_sec)
-    opening = (config.internal_note_only_open_weight if position == "internal" or attached_tail
-               else config.edge_note_only_open_weight)
     cost = NoteRunCost(
-        note_only_open=opening,
+        note_only_open=config.note_only_open_weight,
         note_only_duration=config.note_only_duration_weight * duration,
     )
     return NoteOnlySpan(
@@ -516,15 +507,12 @@ def _optimize_phrase(
                              tuple(note.id for note in selected), split),
                         )
     finalists = []
-    for (unit_index, cursor, previous, _segment), path in states.items():
+    for (unit_index, cursor, _previous, _segment), path in states.items():
         if unit_index != len(units):
             continue
         if any(note.id in required_note_ids for note in notes[cursor:]):
             continue
-        trailing = _note_only(
-            notes[cursor:], "trailing", config,
-            previous_note=notes[previous] if previous is not None else None,
-        )
+        trailing = _note_only(notes[cursor:], "trailing", config)
         step = (_Step(note_only_span=trailing, cost=trailing.cost)
                 if trailing is not None else _Step())
         finalists.append(_extend(path, step, (

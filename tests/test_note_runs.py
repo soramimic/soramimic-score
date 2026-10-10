@@ -77,8 +77,7 @@ def preserving_config(**changes):
         pitch_change_weight=0.3,
         source_note_split_weight=0.3,
         mora_omission_weight=20,
-        internal_note_only_open_weight=10,
-        edge_note_only_open_weight=10,
+        note_only_open_weight=10,
         note_only_duration_weight=10,
         within_syllable_rest_open_weight=1,
         within_syllable_rest_duration_weight=1,
@@ -90,14 +89,28 @@ def preserving_config(**changes):
 
 
 class NoteRunOptimizationTests(unittest.TestCase):
-    def test_attached_pitch_change_is_not_treated_as_detached_phrase_edge(self):
+    def test_short_pitch_change_at_either_phrase_edge_is_retained(self):
+        cases = (
+            (.15, (note("head", 0, .12, 65), note("body", .15, .4))),
+            (.05, (note("body", 0, .3), note("tail", .33, .5, 65))),
+        )
+        for onset, notes in cases:
+            with self.subTest(notes=notes):
+                result = optimize_note_runs(document("カ", (onset,), notes))
+                self.assertEqual(
+                    [n.source_note_ids for n in result.assignments[0].notes],
+                    [(n[0],) for n in notes],
+                )
+                self.assertFalse(result.omitted_source_note_ids)
+                self.assertFalse(result.omitted_mora_ids)
+
+    def test_distant_tail_can_still_be_omitted(self):
         source = document("カ", (0.05,), (
-            note("body", 0, .3), note("tail", .3, .5, 65),
-            note("detached", 1.5, 1.7, 67),
+            note("body", 0, .3), note("detached", 1.5, 1.7, 67),
         ))
         result = optimize_note_runs(source)
         self.assertEqual([n.source_note_ids for n in result.assignments[0].notes],
-                         [("body",), ("tail",)])
+                         [("body",)])
         self.assertEqual(result.omitted_source_note_ids, ("detached",))
         self.assertFalse(result.omitted_mora_ids)
 
@@ -304,23 +317,25 @@ class NoteRunOptimizationTests(unittest.TestCase):
             for start, end in intervals[1:]
         ))
 
-    def test_internal_note_only_has_larger_opening_cost_than_edge(self):
-        source = document("カキ", (0.0, 1.0), (
-            note("n0", 0.0, 0.2), note("middle", 0.4, 0.6, 65),
-            note("n1", 1.0, 1.2), note("tail", 1.4, 1.6, 67),
+    def test_note_omission_cost_does_not_depend_on_phrase_position(self):
+        source = document("カキ", (1.0, 2.0), (
+            note("head", 0.4, 0.6, 65),
+            note("n0", 1.0, 1.2), note("middle", 1.4, 1.6, 65),
+            note("n1", 2.0, 2.2), note("tail", 2.4, 2.6, 67),
         ))
         result = optimize_note_runs(source, preserving_config(
             ctc_onset_weight=100,
-            internal_note_only_open_weight=2,
-            edge_note_only_open_weight=0.1,
+            note_only_open_weight=2,
             note_only_duration_weight=0,
             pitch_change_weight=20,
         ))
         spans = {span.source_note_ids: span for span in result.note_only_spans}
+        self.assertEqual(spans[("head",)].position, "leading")
         self.assertEqual(spans[("middle",)].position, "internal")
         self.assertEqual(spans[("tail",)].position, "trailing")
         self.assertEqual(spans[("middle",)].cost.note_only_open, 2)
-        self.assertEqual(spans[("tail",)].cost.note_only_open, 0.1)
+        self.assertEqual(spans[("head",)].cost.note_only_open, 2)
+        self.assertEqual(spans[("tail",)].cost.note_only_open, 2)
 
     def test_segment_rest_penalty_only_applies_inside_same_segment(self):
         source = document("カキ", (0.0, 1.0), (
@@ -365,7 +380,7 @@ class NoteRunOptimizationTests(unittest.TestCase):
         result = optimize_note_runs(source, preserving_config(
             ctc_onset_weight=1,
             mora_omission_weight=0.1,
-            edge_note_only_open_weight=0,
+            note_only_open_weight=0,
             note_only_duration_weight=0,
         ))
         unit_moras = set(source.singing_units[0].mora_ids)
