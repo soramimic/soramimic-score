@@ -45,7 +45,10 @@ def kana_to_moras(reading: str) -> tuple[str, ...]:
     """Split a kana pronunciation while retaining long marks and special morae."""
     result: list[str] = []
     for char in katakana(reading):
-        if char in SMALL_KANA and result and result[-1] not in SPECIAL_MORAS:
+        # Only a base kana and one small vowel form a combined mora. Extra
+        # small kana retain their own sound instead of creating an unsupported
+        # cluster such as ウォォォ; standalone small kana are handled by G2P.
+        if char in _SMALL_VOWELS and result and result[-1] in _BASE:
             result[-1] += char
         elif "ァ" <= char <= "ヶ" or char == "ー":
             result.append(char)

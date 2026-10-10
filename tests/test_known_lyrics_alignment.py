@@ -33,6 +33,29 @@ class JapaneseReadingTests(unittest.TestCase):
         self.assertEqual(phonemes_for_mora("ン"), ("N",))
         self.assertEqual(phonemes_for_mora("ッ"), ("q",))
 
+    def test_repeated_small_kana_preserve_text_and_pronounce_every_mora(self):
+        cases = {
+            "ウォォォ": ("ウォ", "ォ", "ォ"),
+            "きゅぅぅー": ("キュ", "ゥ", "ゥ", "ー"),
+            "ファァァ": ("ファ", "ァ", "ァ"),
+            "ァィゥ": ("ァ", "ィ", "ゥ"),
+            "アヵヶ": ("ア", "ヵ", "ヶ"),
+        }
+        for reading, expected in cases.items():
+            with self.subTest(reading=reading):
+                self.assertEqual(kana_to_moras(reading), expected)
+                self.assertTrue(all(phonemes_for_mora(mora) for mora in expected))
+                self.assertEqual("".join(kana_to_syllables(reading)), "".join(expected))
+
+    def test_small_kana_runs_after_supported_moras_are_pronounceable(self):
+        for prefix in ("", "ア", "ウォ", "キャ", "ファ", "ン", "ッ", "ー"):
+            for small in "ァィゥェォャュョヮヵヶ":
+                reading = prefix + small * 3
+                with self.subTest(reading=reading):
+                    moras = kana_to_moras(reading)
+                    self.assertEqual("".join(moras), reading)
+                    self.assertTrue(all(phonemes_for_mora(mora) for mora in moras))
+
     def test_syllables_attach_codas_and_long_marks(self):
         self.assertEqual(kana_to_syllables("シンシュンシャンソンショー"),
                          ("シン", "シュン", "シャン", "ソン", "ショー"))
@@ -61,6 +84,31 @@ class JapaneseReadingTests(unittest.TestCase):
 
 
 class KnownLyricsAlignmentTests(unittest.TestCase):
+    def test_repeated_small_kana_align_and_keep_alternate_readings(self):
+        evidence = Evidence("e0", "synthetic-ctc", "alignment", .9)
+        boundary = lambda t: Boundary(t, .9, ("e0",))
+        observations = tuple(
+            ObservedSingingUnit((mora,), boundary(i), boundary(i),
+                               boundary(i + .8), .9, ("e0",))
+            for i, mora in enumerate(("ウォ", "オ", "オ", "ー"))
+        )
+        span = LyricSpan("声", (0, 1), (
+            ReadingCandidate("ウォォォー", "synthetic", 1),
+            ReadingCandidate("ファァァー", "alternative", .5),
+        ))
+        document = build_known_lyrics_document("声", (span,), observations, (evidence,))
+        self.assertEqual(document.canonical_text, "声")
+        self.assertEqual([r.kana for r in document.readings], ["ウォォォー", "ファァァー"])
+        selected = next(r for r in document.readings
+                        if r.id == document.utterances[0].selected_reading_id)
+        self.assertEqual(selected.kana, "ウォォォー")
+        self.assertEqual([m.text for m in document.moras if m.id in selected.mora_ids],
+                         ["ウォ", "ォ", "ォ", "ー"])
+        self.assertTrue(all(m.phoneme_ids for m in document.moras))
+        self.assertTrue(all(u.status == "observed" for u in document.singing_units))
+        self.assertEqual(document.singing_units[0].consonant_start.time_sec, 0)
+        self.assertEqual(document.singing_units[-1].end.time_sec, 3.8)
+
     def test_isolated_small_kana_keep_original_reading_and_long_vowel(self):
         span = LyricSpan("声", (0, 1), (
             ReadingCandidate("ァー", "synthetic", 1),
