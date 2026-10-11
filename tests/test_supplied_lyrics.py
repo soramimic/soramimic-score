@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import math
 from dataclasses import replace
 from pathlib import Path
 
@@ -12,6 +13,38 @@ from soramimic_score.vocal_activity import VocalActivity
 
 
 class SuppliedLyricsTests(unittest.TestCase):
+    def test_roundoff_between_touching_anchors_keeps_missing_lyrics_in_a_real_window(self):
+        for start in (.3, .1 + .2, math.nextafter(.3, math.inf)):
+            with self.subTest(start=start):
+                recognized = (LyricLine("カキ", 0., .3), LyricLine("サシ", start, 1.))
+                supplied = ("カキ", "タチ", "サシ")
+                plan = plan_supplied_lyrics(supplied, recognized)
+                groups = locate_supplied_groups(plan, recognized, 1.)
+                self.assertEqual([g["display_text"] for g in groups], ["カキ", "タチ\nサシ"])
+                self.assertEqual([g["supplied_indices"] for g in groups], [[0], [1, 2]])
+                self.assertEqual([(g["start_sec"], g["end_sec"]) for g in groups], [(0., .3), (.3, 1.)])
+
+    def test_a_real_gap_is_not_merged_by_the_roundoff_tolerance(self):
+        recognized = (LyricLine("カキ", 0., .3), LyricLine("サシ", .31, 1.))
+        plan = plan_supplied_lyrics(("カキ", "タチ", "サシ"), recognized)
+        groups = locate_supplied_groups(plan, recognized, 1.)
+        self.assertEqual([g["display_text"] for g in groups], ["カキ", "タチ", "サシ"])
+        self.assertEqual((groups[1]["start_sec"], groups[1]["end_sec"]), (.3, .31))
+
+    def test_a_single_roundoff_sized_window_is_unresolved_without_alignment_or_removal(self):
+        for adjust in (False, True):
+            with self.subTest(adjust=adjust):
+                adapters = self.adapters((), duration=1e-12)
+                lines, plan, unobserved = prepare_supplied_audio(
+                    self.path, ("カキ",), (), (), adapters, adjust_lyrics=adjust,
+                    recognition_evidence=(),
+                )
+                self.assertEqual(unobserved, (0,))
+                self.assertEqual(lines[0].text, "カキ")
+                self.assertIsNone(lines[0].start_sec)
+                self.assertEqual(plan["groups"][0]["alignment_status"], "window-unresolved")
+                self.assertEqual(plan["removed_supplied_indices"], [])
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.path = Path(self.temporary.name) / "input.wav"
