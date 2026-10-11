@@ -1,11 +1,13 @@
-from dataclasses import replace
+from dataclasses import asdict, replace
 import math
 import unittest
+from unittest.mock import patch
 
 from soramimic_score.alignment import ObservedSingingUnit, build_known_lyrics_document
 from soramimic_score.ir import Boundary, Evidence, NoteCandidate
 from soramimic_score.japanese import LyricSpan, ReadingCandidate
 from soramimic_score.note_runs import NoteRunConfig, optimize_note_runs
+from soramimic_score import note_runs
 
 
 def document(kana, onsets, notes):
@@ -89,6 +91,47 @@ def preserving_config(**changes):
 
 
 class NoteRunOptimizationTests(unittest.TestCase):
+    def test_dense_phrase_evaluates_each_interval_once_per_lyric_position(self):
+        size = 12
+        source = document(
+            "カ" * size, tuple(index * .2 for index in range(size)),
+            tuple(note(f"n{index}", index * .2, index * .2 + .18, 60 + index % 2)
+                  for index in range(size)),
+        )
+        with patch.object(note_runs, "_assignment_cost",
+                          wraps=note_runs._assignment_cost) as evaluate:
+            result = optimize_note_runs(source)
+
+        self.assertEqual(
+            [assignment.notes[0].source_note_ids for assignment in result.assignments],
+            [(f"n{index}",) for index in range(size)],
+        )
+        self.assertFalse(result.omitted_mora_ids)
+        self.assertFalse(result.omitted_source_note_ids)
+        self.assertEqual(result.total_cost, 0)
+        # The many predecessor paths must share interval evaluations. This
+        # bound checks the work directly without a machine-dependent timeout.
+        self.assertLessEqual(evaluate.call_count, size * size * (size + 1) // 2)
+
+    def test_zero_cost_ties_preserve_assignment_order(self):
+        settings = NoteRunConfig(**{
+            key: 0.0 for key in asdict(NoteRunConfig())
+            if key.endswith("weight") or key.endswith("sec2")
+        })
+        result = optimize_note_runs(
+            document("カキ", (.05, .25), (
+                note("n0", 0, .2), note("n1", .2, .4),
+            )), settings,
+        )
+        self.assertEqual([item.kana for item in result.assignments], ["カ", "キ"])
+        self.assertEqual(
+            [item.notes[0].source_note_ids for item in result.assignments],
+            [("n0",), ("n1",)],
+        )
+        self.assertEqual(result.total_cost, 0)
+        self.assertFalse(result.omitted_mora_ids)
+        self.assertFalse(result.omitted_source_note_ids)
+
     def test_short_pitch_change_at_either_phrase_edge_is_retained(self):
         cases = (
             (.15, (note("head", 0, .12, 65), note("body", .15, .4))),

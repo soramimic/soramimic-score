@@ -16,6 +16,7 @@ confidence values are not inputs.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
+from functools import lru_cache
 import math
 from typing import Mapping, Sequence
 
@@ -333,7 +334,7 @@ def _note_only(
 
 def _assignment_cost(
     units: Sequence[_Unit], source_notes: Sequence[NoteCandidate],
-    output_notes: Sequence[PreservedNote], *, split: bool,
+    *, start_sec: float, split: bool,
     previous_note: NoteCandidate | None, previous_segment: str | None,
     config: NoteRunConfig,
     line_windows_by_utterance: Mapping[str, tuple[float, float]] | None,
@@ -344,8 +345,9 @@ def _assignment_cost(
     gaps = [max(0.0, right.start_sec - left.end_sec)
             for left, right in zip(source_notes, source_notes[1:])]
     audible_gaps = [gap for gap in gaps if gap > config.rest_gap_threshold_sec]
+    # Coalescing adjacent equal pitches cannot change the pitch-change count.
     pitch_changes = sum(left.midi_pitch != right.midi_pitch
-                        for left, right in zip(output_notes, output_notes[1:]))
+                        for left, right in zip(source_notes, source_notes[1:]))
     segments = {unit.segment_id for unit in units}
     if len(segments) > 1:
         raise ValueError("one syllable cannot cross lyric segments")
@@ -353,14 +355,9 @@ def _assignment_cost(
     utterances = {unit.utterance_id for unit in units}
     if len(utterances) > 1:
         raise ValueError("one syllable cannot cross utterances")
-    segment_gap = 0.0
-    if (previous_note is not None and segment is not None and segment == previous_segment
-            and source_notes[0].start_sec >= previous_note.end_sec):
-        segment_gap = source_notes[0].start_sec - previous_note.end_sec
-    segment_rest = 0.0
-    if segment_gap > config.rest_gap_threshold_sec:
-        segment_rest = (config.segment_rest_open_weight
-                        + config.segment_rest_duration_weight * segment_gap)
+    segment_rest = _segment_rest_cost(
+        source_notes[0], previous_note, segment, previous_segment, config,
+    )
     within_rest = 0.0
     if audible_gaps:
         within_rest = (config.within_syllable_rest_open_weight * len(audible_gaps)
@@ -395,7 +392,7 @@ def _assignment_cost(
     return NoteRunCost(
         ctc_onset_distance=(
             config.ctc_onset_weight
-            * sum(abs(float(unit.ctc_onset_sec) - output_notes[0].start_sec)
+            * sum(abs(float(unit.ctc_onset_sec) - start_sec)
                   for unit in units if unit.onset_supports_timing)
             / config.ctc_onset_scale_sec
         ),
@@ -405,6 +402,19 @@ def _assignment_cost(
         within_syllable_rest=within_rest,
         segment_rest=segment_rest,
     )
+
+
+def _segment_rest_cost(
+    first_note: NoteCandidate, previous_note: NoteCandidate | None,
+    segment: str | None, previous_segment: str | None, config: NoteRunConfig,
+) -> float:
+    gap = 0.0
+    if (previous_note is not None and segment is not None and segment == previous_segment
+            and first_note.start_sec >= previous_note.end_sec):
+        gap = first_note.start_sec - previous_note.end_sec
+    if gap > config.rest_gap_threshold_sec:
+        return config.segment_rest_open_weight + config.segment_rest_duration_weight * gap
+    return 0.0
 
 
 def _extend(path: _Path, step: _Step, signature: tuple[object, ...]) -> _Path:
@@ -432,6 +442,24 @@ def _optimize_phrase(
         (0, 0, None, None): _Path(NoteRunCost(), (), ())
     }
     for unit_index in range(len(units)):
+        # Predecessor paths repeatedly consider the same lyric/note interval.
+        # Cache only its scalar cost, scoped to one lyric position and bounded
+        # independently of the phrase length. Materialize notes only for a path
+        # that actually replaces a state below.
+        @lru_cache(maxsize=65536)
+        def assignment_cost(
+            end_unit: int, start_note: int, end_note: int, split: bool,
+        ) -> NoteRunCost:
+            group = units[unit_index:end_unit]
+            selected = notes[start_note:end_note]
+            return _assignment_cost(
+                group, selected,
+                start_sec=(float(group[0].ctc_onset_sec)
+                           if split else selected[0].start_sec),
+                split=split, previous_note=None, previous_segment=None,
+                config=config, line_windows_by_utterance=line_windows_by_utterance,
+            )
+
         current = [(state, path) for state, path in states.items()
                    if state[0] == unit_index]
         for (unused_unit, cursor, previous_index, previous_segment), path in current:
@@ -473,25 +501,40 @@ def _optimize_phrase(
                         continue
                     position = "leading" if previous_index is None else "internal"
                     skipped = _note_only(skipped_notes, position, config)
+                    previous_note = (notes[previous_index]
+                                     if previous_index is not None else None)
+                    segment_rest = _segment_rest_cost(
+                        notes[start_note], previous_note, segment, previous_segment, config,
+                    )
                     for end_note in range(start_note + 1, len(notes) + 1):
+                        cost = assignment_cost(end_unit, start_note, end_note, split)
+                        if segment_rest or math.copysign(1.0, segment_rest) < 0:
+                            cost = replace(cost, segment_rest=segment_rest)
+                        if skipped is not None:
+                            cost += skipped.cost
+                        next_cursor = max(cursor, end_note)
+                        state = (end_unit, next_cursor, end_note - 1, segment)
+                        candidate_cost = path.cost + cost
+                        candidate_total = candidate_cost.total
+                        incumbent = states.get(state)
+                        incumbent_total = incumbent.cost.total if incumbent is not None else math.inf
+                        if incumbent is not None and candidate_total > incumbent_total:
+                            continue
                         selected = notes[start_note:end_note]
+                        mora_ids = tuple(mid for item in group for mid in item.mora_ids)
+                        tie_key = path.tie_key + (
+                            "assign", mora_ids, tuple(note.id for note in selected), split,
+                        )
+                        if (incumbent is not None and not (
+                            (candidate_total, tie_key) < (incumbent_total, incumbent.tie_key)
+                        )):
+                            continue
                         output = _coalesce(
                             selected,
                             start_sec=(float(group[0].ctc_onset_sec)
                                        if split else selected[0].start_sec),
                             config=config,
                         )
-                        previous_note = (notes[previous_index]
-                                         if previous_index is not None else None)
-                        cost = _assignment_cost(
-                            group, selected, output, split=split,
-                            previous_note=previous_note,
-                            previous_segment=previous_segment, config=config,
-                            line_windows_by_utterance=line_windows_by_utterance,
-                        )
-                        if skipped is not None:
-                            cost += skipped.cost
-                        mora_ids = tuple(mid for item in group for mid in item.mora_ids)
                         assignment = NoteRunAssignment(
                             tuple(dict.fromkeys(item.source.id for item in group)),
                             mora_ids, "".join(item.kana for item in group), segment,
@@ -499,13 +542,7 @@ def _optimize_phrase(
                         )
                         step = _Step(assignment=assignment,
                                      note_only_span=skipped, cost=cost)
-                        next_cursor = max(cursor, end_note)
-                        _keep(
-                            states, (end_unit, next_cursor, end_note - 1, segment),
-                            path, step,
-                            ("assign", mora_ids,
-                             tuple(note.id for note in selected), split),
-                        )
+                        states[state] = _Path(candidate_cost, path.steps + (step,), tie_key)
     finalists = []
     for (unit_index, cursor, _previous, _segment), path in states.items():
         if unit_index != len(units):
