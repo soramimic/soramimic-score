@@ -200,6 +200,27 @@ class NoteRunOptimizationTests(unittest.TestCase):
         self.assertEqual(actual, expected)
         self.assertFalse(any(step.omitted_mora_ids or step.note_only_span for step in actual.steps))
 
+    def test_partition_cannot_omit_phase_supported_across_cut(self):
+        onsets = [index + .05 for index in range(24)]
+        onsets[12] = 11.5
+        source = document(
+            "カ" * 24, onsets,
+            tuple(note(f"n{index}", index, index + .98, 60 + index % 2)
+                  for index in range(24)),
+        )
+        units = list(note_runs._units(source, None)[0][1])
+        units[12] = replace(units[12], must_assign=True, independent_phase=True)
+        config = NoteRunConfig(mora_omission_weight=0)
+        self.assertIsNone(note_runs._partitioned_candidate(
+            units, source.note_candidates, config, None, frozenset(),
+        ))
+        expected = note_runs._search_phrase(units, source.note_candidates, config)
+        actual = note_runs._optimize_phrase(units, source.note_candidates, config)
+        self.assertEqual(actual, expected)
+        self.assertFalse(any(
+            units[12].mora_ids == step.omitted_mora_ids for step in actual.steps
+        ))
+
     def test_large_uncertain_partition_does_not_launch_another_large_search(self):
         source = document(
             "カ" * 24, tuple(index * .1 for index in range(24)),

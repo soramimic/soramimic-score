@@ -665,6 +665,17 @@ def _partitioned_candidate(
         # A required repeated-vocalization note may need a crossing assignment.
         # The unrestricted search must still be allowed to find that path.
         return None
+    omitted = {mid for path in paths for step in path.steps for mid in step.omitted_mora_ids}
+    if any(
+        unit.must_assign and any(mid in omitted for mid in unit.mora_ids)
+        and unit.ctc_onset_sec is not None and any(
+            note.start_sec - .12 <= unit.ctc_onset_sec <= note.end_sec + .12 for note in notes
+        )
+        for unit in units
+    ):
+        # A phase can lack note support locally while a note across the cut
+        # makes it mandatory in the full phrase. Such a seed is not feasible.
+        return None
     return _join_partition_paths(paths, units, notes, config, line_windows_by_utterance)
 
 
