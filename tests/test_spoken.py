@@ -4,14 +4,15 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from soramimic_score import (AlignedMora, AudioAdapters, AudioPipelineError,
-                             LyricLine, MelodyNote, ReadingSelection, analyze_audio)
+from soramimic_score import (AlignedMora, AudioAdapters, AudioPipelineError, Boundary, Evidence,
+                             LyricLine, LyricSpan, MelodyNote, NoteCandidate,
+                             ReadingCandidate, ReadingSelection, analyze_audio,
+                             build_known_lyrics_document)
 from soramimic_score.document import from_linked_observations, loads
 from soramimic_score.exports import export_midi, export_musicxml
 from soramimic_score.spoken import add_spoken_fallback
 from soramimic_score.vocal_activity import VocalActivity, measure_vocal_activity
 from test_realization import document, linked
-from soramimic_score import Boundary, NoteCandidate
 
 
 def voiced(windows):
@@ -77,6 +78,104 @@ class SpokenTests(unittest.TestCase):
         self.assertEqual(pitched, before.score.synthesis_plan)
         self.assertEqual([(s.start_sec, s.end_sec) for s in result.score.synthesis_plan],
                          [(0, .25), (.25, .5), (.6, .8)])
+
+    def test_fallback_cannot_precede_a_delayed_earlier_lyric(self):
+        before = from_linked_observations(linked(document(), [
+            ("match", ("s0",), ("n0",)), ("unit_only", ("s1",), ()),
+            ("unit_only", ("s2",), ()),
+        ], [NoteCandidate("n0", 1, 1.2, 67, .8, ("test",))]))
+
+        after = add_spoken_fallback(before, {"u0": (0, 1.5)}, voiced)
+
+        self.assertEqual(after.score.synthesis_plan, before.score.synthesis_plan)
+        self.assertEqual(after.score.unresolved_unit_ids, ("s1", "s2"))
+        self.assertEqual(after.score.canonical, before.score.canonical)
+        self.assertEqual(after.observations, before.observations)
+        self.assertFalse(after.score.omissions)
+        self.assertIn("spoken_fallback_order_conflict:s1", after.score.diagnostics)
+        self.assertEqual(add_spoken_fallback(after, {"u0": (0, 1.5)}, voiced), after)
+        self.assertEqual(loads(after.to_json()), after)
+
+    def test_fallback_cannot_follow_a_premature_later_lyric(self):
+        ir = document()
+        first = replace(ir.singing_units[0], consonant_start=Boundary(.2, .9, ("ctc",)),
+                        end=Boundary(.25, .9, ("ctc",)))
+        ir = replace(ir, singing_units=(first, *ir.singing_units[1:]))
+        before = from_linked_observations(linked(ir, [
+            ("unit_only", ("s0",), ()), ("match", ("s1",), ("n0",)),
+            ("unit_only", ("s2",), ()),
+        ], [NoteCandidate("n0", 0, .1, 67, .8, ("test",))]))
+
+        after = add_spoken_fallback(before, {"u0": (0, 1)}, voiced)
+
+        self.assertEqual([slot.singing_unit_id for slot in after.score.synthesis_plan],
+                         ["s1", "s2"])
+        self.assertEqual(after.score.synthesis_plan[0], before.score.synthesis_plan[0])
+        self.assertEqual(after.score.unresolved_unit_ids, ("s0",))
+        self.assertEqual(after.score.canonical, before.score.canonical)
+
+    def test_fallback_cannot_insert_a_later_lyric_inside_a_melisma(self):
+        before = from_linked_observations(linked(document("カキ", 2), [
+            ("melisma", ("s0",), ("n0", "n1")), ("unit_only", ("s1",), ()),
+        ], [NoteCandidate("n0", 0, .1, 67, .8, ("test",)),
+            NoteCandidate("n1", .8, .9, 69, .8, ("test",))]))
+
+        after = add_spoken_fallback(before, {"u0": (0, 1)}, voiced)
+
+        self.assertEqual(after.score.synthesis_plan, before.score.synthesis_plan)
+        self.assertEqual(after.score.unresolved_unit_ids, ("s1",))
+        self.assertIn("spoken_fallback_order_conflict:s1", after.score.diagnostics)
+
+    def test_unpitched_line_cannot_cross_a_later_lyric_line(self):
+        ir = build_known_lyrics_document("カ\nキ", (
+            LyricSpan("カ", (0, 1), (ReadingCandidate("カ", "synthetic", 1),)),
+            LyricSpan("キ", (2, 3), (ReadingCandidate("キ", "synthetic", 1),)),
+        ))
+        before = from_linked_observations(linked(ir, [
+            ("unit_only", ("s0",), ()), ("match", ("s1",), ("n0",)),
+        ], [NoteCandidate("n0", .5, .6, 67, .8, ("test",))]))
+
+        after = add_spoken_fallback(before, {"u0": (1, 2), "u1": (.5, .6)}, voiced,
+                                    fill_unpitched_lines=True)
+
+        self.assertEqual(after.score.synthesis_plan, before.score.synthesis_plan)
+        self.assertEqual(after.score.unresolved_unit_ids, ("s0",))
+        self.assertEqual(after.score.canonical, before.score.canonical)
+        self.assertIn("spoken_fallback_order_conflict:s0", after.score.diagnostics)
+
+    def test_new_fallbacks_follow_lyrics_even_with_reversed_observed_lines(self):
+        ir = build_known_lyrics_document("カ\nキ", (
+            LyricSpan("カ", (0, 1), (ReadingCandidate("カ", "synthetic", 1),)),
+            LyricSpan("キ", (2, 3), (ReadingCandidate("キ", "synthetic", 1),)),
+        ))
+        ir = replace(ir, evidence=(Evidence("ctc", "synthetic", "token-alignment", .9),))
+        ir = replace(ir, singing_units=tuple(
+            replace(u, status="observed",
+                    consonant_start=Boundary(start, .9, (ir.evidence[0].id,)),
+                    end=Boundary(end, .9, (ir.evidence[0].id,)))
+            for u, (start, end) in zip(ir.singing_units, ((1, 2), (0, .5)))))
+        before = from_linked_observations(ir)
+
+        for fill_lines in (False, True):
+            with self.subTest(fill_unpitched_lines=fill_lines):
+                after = add_spoken_fallback(before, {"u0": (1, 2), "u1": (0, .5)},
+                                            voiced, fill_unpitched_lines=fill_lines)
+                self.assertEqual([s.singing_unit_id for s in after.score.synthesis_plan],
+                                 ["s0"])
+                self.assertEqual(after.score.unresolved_unit_ids, ("s1",))
+                self.assertEqual(after.score.canonical, before.score.canonical)
+                self.assertIn("spoken_fallback_order_conflict:s1", after.score.diagnostics)
+                self.assertEqual(loads(after.to_json()), after)
+
+    def test_fallback_uses_canonical_order_when_performed_storage_is_reversed(self):
+        before = from_linked_observations(document())
+        reordered = replace(before, score=replace(
+            before.score, performed=tuple(reversed(before.score.performed))))
+        after = add_spoken_fallback(reordered, {"u0": (0, 1)}, voiced)
+        expected = add_spoken_fallback(before, {"u0": (0, 1)}, voiced)
+
+        self.assertEqual(after.score.synthesis_plan, expected.score.synthesis_plan)
+        self.assertFalse(after.score.unresolved_unit_ids)
 
     def test_silent_and_unobserved_units_remain_unresolved(self):
         before = from_linked_observations(document(observed=2))

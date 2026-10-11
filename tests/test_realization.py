@@ -30,6 +30,24 @@ def linked(doc, links, notes=None):
 
 
 class RealizationTests(unittest.TestCase):
+    def test_time_order_alone_does_not_make_reversed_lyrics_valid(self):
+        doc = linked(document(), [
+            ("match", ("s0",), ("n0",)), ("match", ("s1",), ("n1",)),
+            ("match", ("s2",), ("n2",)),
+        ], [NoteCandidate("n0", 0, .3, 60, .8, ("synthetic",)),
+            NoteCandidate("n1", .3, .6, 62, .8, ("synthetic",)),
+            NoteCandidate("n2", .6, .9, 64, .8, ("synthetic",))])
+        score = compile_realization(doc)
+        first, middle, last = score.synthesis_plan
+        invalid = replace(score, synthesis_plan=(
+            replace(last, start_sec=0, end_sec=.3), middle,
+            replace(first, start_sec=.6, end_sec=.9),
+        ))
+        with self.assertRaisesRegex(ValueError, "canonical lyric order"):
+            invalid.validate()
+        with self.assertRaisesRegex(ValueError, "canonical lyric order"):
+            Realization.from_dict(invalid.to_dict())
+
     def test_multi_syllable_stack_is_rejected(self):
         doc = linked(document(), [("stack", ("s0", "s1", "s2"), ("n0",))])
         before = doc.to_json()
