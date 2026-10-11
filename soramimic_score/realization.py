@@ -135,6 +135,9 @@ class Realization:
                     or unit.status not in {"observed", "weak", "unobserved"}):
                 raise ValueError("invalid performed unit")
         previous_end = 0.0
+        mora_order = {mid: i for i, mid in enumerate(canonical_moras)}
+        previous_unit = None
+        previous_mora = -1
         for slot in self.synthesis_plan:
             if validate_reading(slot.kana).kana != slot.kana:
                 raise ValueError("synthesis kana must be normalized")
@@ -144,6 +147,11 @@ class Realization:
                     or slot.mora_ids != by_unit[slot.singing_unit_id].mora_ids
                     or set(slot.evidence_ids) - known_evidence or not slot.pitch_sources):
                 raise ValueError("invalid synthesis slot ownership")
+            positions = [mora_order[mid] for mid in slot.mora_ids]
+            if slot.singing_unit_id != previous_unit and min(positions) <= previous_mora:
+                raise ValueError("synthesis slots must follow canonical lyric order")
+            previous_unit = slot.singing_unit_id
+            previous_mora = max(positions)
             seen.add(slot.id)
             if (not slot.kana or not math.isfinite(slot.start_sec + slot.end_sec)
                     or slot.start_sec < previous_end - 1e-9
