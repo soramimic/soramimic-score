@@ -15,6 +15,13 @@ if TYPE_CHECKING:
     from .audio import LyricLine
 
 
+_TIMESTAMP_EPSILON_SEC = 1e-6
+
+
+def _has_duration(start, end):
+    return end - start > _TIMESTAMP_EPSILON_SEC
+
+
 def plan_supplied_lyrics(
     supplied: Sequence[str], recognized: Sequence[LyricLine], *,
     reading: Callable[[str], str] | None = None,
@@ -122,7 +129,7 @@ def locate_supplied_groups(plan, recognized, duration):
     index = 0
     while index < len(groups):
         group = groups[index]
-        if group["end_sec"] > group["start_sec"] or len(groups) == 1:
+        if _has_duration(group["start_sec"], group["end_sec"]) or len(groups) == 1:
             index += 1
             continue
         start = index if index + 1 < len(groups) else index - 1
@@ -155,7 +162,7 @@ def prepare_supplied_audio(path, supplied, recognized, notes, adapters, *, adjus
                                 add_missing=adjust_lyrics)
     groups = locate_supplied_groups(plan, recognized, duration)
     windows = [(g["start_sec"], g["end_sec"]) for g in groups
-               if g["end_sec"] > g["start_sec"]]
+               if _has_duration(g["start_sec"], g["end_sec"])]
     activity = (tuple(_run_adapter("vocal activity", adapters.vocal_activity, path, windows))
                 if adapters.vocal_activity is not None and windows else None)
     if activity is not None and len(activity) != len(windows):
@@ -208,11 +215,11 @@ def prepare_supplied_audio(path, supplied, recognized, notes, adapters, *, adjus
                 "alignment_status": "not-aligned", "line_indices": [], "utterance_ids": [],
             })
             continue
-        missing = end <= start or no_evidence
+        missing = not _has_duration(start, end) or no_evidence
         index = len(lines)
         group.update(line_indices=[index], utterance_ids=[f"u{index}"])
         if missing:
-            group["alignment_status"] = ("window-unresolved" if end <= start
+            group["alignment_status"] = ("window-unresolved" if not _has_duration(start, end)
                                          else "no-performance-evidence")
             unobserved.append(index)
         else:
