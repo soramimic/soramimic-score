@@ -15,7 +15,9 @@ confidence values are not inputs.
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from dataclasses import asdict, dataclass, replace
+from functools import lru_cache
 import math
 from typing import Mapping, Sequence
 
@@ -333,7 +335,7 @@ def _note_only(
 
 def _assignment_cost(
     units: Sequence[_Unit], source_notes: Sequence[NoteCandidate],
-    output_notes: Sequence[PreservedNote], *, split: bool,
+    *, start_sec: float, split: bool,
     previous_note: NoteCandidate | None, previous_segment: str | None,
     config: NoteRunConfig,
     line_windows_by_utterance: Mapping[str, tuple[float, float]] | None,
@@ -344,8 +346,9 @@ def _assignment_cost(
     gaps = [max(0.0, right.start_sec - left.end_sec)
             for left, right in zip(source_notes, source_notes[1:])]
     audible_gaps = [gap for gap in gaps if gap > config.rest_gap_threshold_sec]
+    # Coalescing adjacent equal pitches cannot change the pitch-change count.
     pitch_changes = sum(left.midi_pitch != right.midi_pitch
-                        for left, right in zip(output_notes, output_notes[1:]))
+                        for left, right in zip(source_notes, source_notes[1:]))
     segments = {unit.segment_id for unit in units}
     if len(segments) > 1:
         raise ValueError("one syllable cannot cross lyric segments")
@@ -353,14 +356,9 @@ def _assignment_cost(
     utterances = {unit.utterance_id for unit in units}
     if len(utterances) > 1:
         raise ValueError("one syllable cannot cross utterances")
-    segment_gap = 0.0
-    if (previous_note is not None and segment is not None and segment == previous_segment
-            and source_notes[0].start_sec >= previous_note.end_sec):
-        segment_gap = source_notes[0].start_sec - previous_note.end_sec
-    segment_rest = 0.0
-    if segment_gap > config.rest_gap_threshold_sec:
-        segment_rest = (config.segment_rest_open_weight
-                        + config.segment_rest_duration_weight * segment_gap)
+    segment_rest = _segment_rest_cost(
+        source_notes[0], previous_note, segment, previous_segment, config,
+    )
     within_rest = 0.0
     if audible_gaps:
         within_rest = (config.within_syllable_rest_open_weight * len(audible_gaps)
@@ -395,7 +393,7 @@ def _assignment_cost(
     return NoteRunCost(
         ctc_onset_distance=(
             config.ctc_onset_weight
-            * sum(abs(float(unit.ctc_onset_sec) - output_notes[0].start_sec)
+            * sum(abs(float(unit.ctc_onset_sec) - start_sec)
                   for unit in units if unit.onset_supports_timing)
             / config.ctc_onset_scale_sec
         ),
@@ -405,6 +403,19 @@ def _assignment_cost(
         within_syllable_rest=within_rest,
         segment_rest=segment_rest,
     )
+
+
+def _segment_rest_cost(
+    first_note: NoteCandidate, previous_note: NoteCandidate | None,
+    segment: str | None, previous_segment: str | None, config: NoteRunConfig,
+) -> float:
+    gap = 0.0
+    if (previous_note is not None and segment is not None and segment == previous_segment
+            and first_note.start_sec >= previous_note.end_sec):
+        gap = first_note.start_sec - previous_note.end_sec
+    if gap > config.rest_gap_threshold_sec:
+        return config.segment_rest_open_weight + config.segment_rest_duration_weight * gap
+    return 0.0
 
 
 def _extend(path: _Path, step: _Step, signature: tuple[object, ...]) -> _Path:
@@ -423,17 +434,37 @@ def _keep(
         states[state] = proposal
 
 
-def _optimize_phrase(
+def _search_phrase(
     units: Sequence[_Unit], notes: Sequence[NoteCandidate], config: NoteRunConfig,
     line_windows_by_utterance: Mapping[str, tuple[float, float]] | None = None,
     required_note_ids: frozenset[str] = frozenset(),
+    *, complete_path: _Path | None = None,
 ) -> _Path:
+    ceiling = complete_path.cost.total if complete_path is not None else math.inf
     states: dict[tuple[int, int, int | None, str | None], _Path] = {
         (0, 0, None, None): _Path(NoteRunCost(), (), ())
     }
     for unit_index in range(len(units)):
+        # Predecessor paths repeatedly consider the same lyric/note interval.
+        # Cache only its scalar cost, scoped to one lyric position and bounded
+        # independently of the phrase length. Materialize notes only for a path
+        # that actually replaces a state below.
+        @lru_cache(maxsize=65536)
+        def assignment_cost(
+            end_unit: int, start_note: int, end_note: int, split: bool,
+        ) -> NoteRunCost:
+            group = units[unit_index:end_unit]
+            selected = notes[start_note:end_note]
+            return _assignment_cost(
+                group, selected,
+                start_sec=(float(group[0].ctc_onset_sec)
+                           if split else selected[0].start_sec),
+                split=split, previous_note=None, previous_segment=None,
+                config=config, line_windows_by_utterance=line_windows_by_utterance,
+            )
+
         current = [(state, path) for state, path in states.items()
-                   if state[0] == unit_index]
+                   if state[0] == unit_index and path.cost.total <= ceiling]
         for (unused_unit, cursor, previous_index, previous_segment), path in current:
             unit = units[unused_unit]
             supported_phase = (unit.ctc_onset_sec is not None and any(
@@ -473,25 +504,46 @@ def _optimize_phrase(
                         continue
                     position = "leading" if previous_index is None else "internal"
                     skipped = _note_only(skipped_notes, position, config)
+                    previous_note = (notes[previous_index]
+                                     if previous_index is not None else None)
+                    segment_rest = _segment_rest_cost(
+                        notes[start_note], previous_note, segment, previous_segment, config,
+                    )
                     for end_note in range(start_note + 1, len(notes) + 1):
+                        cost = assignment_cost(end_unit, start_note, end_note, split)
+                        if segment_rest or math.copysign(1.0, segment_rest) < 0:
+                            cost = replace(cost, segment_rest=segment_rest)
+                        if skipped is not None:
+                            cost += skipped.cost
+                        next_cursor = max(cursor, end_note)
+                        state = (end_unit, next_cursor, end_note - 1, segment)
+                        candidate_cost = path.cost + cost
+                        candidate_total = candidate_cost.total
+                        # For this fixed start, extending the note interval can
+                        # only add nonnegative costs. A feasible complete path
+                        # bounds this interval and every longer one. Keep equal
+                        # costs so the original deterministic tie order survives.
+                        if candidate_total > ceiling:
+                            break
+                        incumbent = states.get(state)
+                        incumbent_total = incumbent.cost.total if incumbent is not None else math.inf
+                        if incumbent is not None and candidate_total > incumbent_total:
+                            continue
                         selected = notes[start_note:end_note]
+                        mora_ids = tuple(mid for item in group for mid in item.mora_ids)
+                        tie_key = path.tie_key + (
+                            "assign", mora_ids, tuple(note.id for note in selected), split,
+                        )
+                        if (incumbent is not None and not (
+                            (candidate_total, tie_key) < (incumbent_total, incumbent.tie_key)
+                        )):
+                            continue
                         output = _coalesce(
                             selected,
                             start_sec=(float(group[0].ctc_onset_sec)
                                        if split else selected[0].start_sec),
                             config=config,
                         )
-                        previous_note = (notes[previous_index]
-                                         if previous_index is not None else None)
-                        cost = _assignment_cost(
-                            group, selected, output, split=split,
-                            previous_note=previous_note,
-                            previous_segment=previous_segment, config=config,
-                            line_windows_by_utterance=line_windows_by_utterance,
-                        )
-                        if skipped is not None:
-                            cost += skipped.cost
-                        mora_ids = tuple(mid for item in group for mid in item.mora_ids)
                         assignment = NoteRunAssignment(
                             tuple(dict.fromkeys(item.source.id for item in group)),
                             mora_ids, "".join(item.kana for item in group), segment,
@@ -499,13 +551,7 @@ def _optimize_phrase(
                         )
                         step = _Step(assignment=assignment,
                                      note_only_span=skipped, cost=cost)
-                        next_cursor = max(cursor, end_note)
-                        _keep(
-                            states, (end_unit, next_cursor, end_note - 1, segment),
-                            path, step,
-                            ("assign", mora_ids,
-                             tuple(note.id for note in selected), split),
-                        )
+                        states[state] = _Path(candidate_cost, path.steps + (step,), tie_key)
     finalists = []
     for (unit_index, cursor, _previous, _segment), path in states.items():
         if unit_index != len(units):
@@ -521,6 +567,130 @@ def _optimize_phrase(
     if not finalists:
         raise RuntimeError("note-run optimizer did not reach a terminal state")
     return min(finalists, key=lambda path: (path.cost.total, path.tie_key))
+
+
+def _join_partition_paths(
+    paths: Sequence[_Path], units: Sequence[_Unit], notes: Sequence[NoteCandidate],
+    config: NoteRunConfig,
+    line_windows_by_utterance: Mapping[str, tuple[float, float]] | None,
+) -> _Path:
+    """Replay local decisions as one feasible path, charging every join once."""
+    note_indices = {note.id: index for index, note in enumerate(notes)}
+    unit_ends = {mid: index + 1 for index, unit in enumerate(units) for mid in unit.mora_ids}
+    result = _Path(NoteRunCost(), (), ())
+    cursor = unit_index = 0
+    previous_index = previous_segment = None
+    for path in paths:
+        for step in path.steps:
+            if step.omitted_mora_ids:
+                result = _extend(result, step, ("omit-mora", units[unit_index].source.id))
+                unit_index += 1
+                continue
+            assignment = step.assignment
+            if assignment is None:
+                # Local trailing/leading gaps are recomputed on the full note
+                # sequence. Concatenating their costs would charge two opens.
+                continue
+            end_unit = unit_ends[assignment.mora_ids[-1]]
+            group = units[unit_index:end_unit]
+            start_note = note_indices[assignment.notes[0].source_note_ids[0]]
+            end_note = note_indices[assignment.notes[-1].source_note_ids[-1]] + 1
+            selected = notes[start_note:end_note]
+            split = assignment.source_note_split
+            skipped = _note_only(
+                () if split else notes[cursor:start_note],
+                "leading" if previous_index is None else "internal", config,
+            )
+            cost = _assignment_cost(
+                group, selected, start_sec=assignment.notes[0].start_sec, split=split,
+                previous_note=notes[previous_index] if previous_index is not None else None,
+                previous_segment=previous_segment, config=config,
+                line_windows_by_utterance=line_windows_by_utterance,
+            )
+            if skipped is not None:
+                cost += skipped.cost
+            assignment = replace(assignment, cost=cost)
+            result = _extend(result, _Step(assignment, note_only_span=skipped, cost=cost), (
+                "assign", assignment.mora_ids, tuple(note.id for note in selected), split,
+            ))
+            cursor = max(cursor, end_note)
+            unit_index = end_unit
+            previous_index, previous_segment = end_note - 1, assignment.segment_id
+    trailing = _note_only(notes[cursor:], "trailing", config)
+    return _extend(result, _Step(note_only_span=trailing,
+                                 cost=trailing.cost if trailing else NoteRunCost()), (
+        "terminal", () if trailing is None else trailing.source_note_ids,
+    ))
+
+
+def _partitioned_candidate(
+    units: Sequence[_Unit], notes: Sequence[NoteCandidate], config: NoteRunConfig,
+    line_windows_by_utterance: Mapping[str, tuple[float, float]] | None,
+    required_note_ids: frozenset[str],
+) -> _Path | None:
+    """Find a cheap upper bound, without making these cuts final boundaries."""
+    if len(units) < 24 or len(notes) < 24:
+        return None
+    cuts = [(0, 0)]
+    starts = [note.start_sec for note in notes]
+    for index in range(1, len(units)):
+        left, right = units[index - 1:index + 1]
+        if (index - cuts[-1][0] < 12 or len(units) - index < 6
+                or left.base_syllable == right.base_syllable
+                or left.ctc_onset_sec is None or right.ctc_onset_sec is None
+                or not left.onset_supports_timing or not right.onset_supports_timing
+                or left.ctc_onset_sec > right.ctc_onset_sec):
+            continue
+        note_index = bisect_left(starts, (left.ctc_onset_sec + right.ctc_onset_sec) / 2)
+        if cuts[-1][1] < note_index < len(notes):
+            cuts.append((index, note_index))
+    if len(cuts) == 1:
+        return None
+    cuts.append((len(units), len(notes)))
+    if any(last_unit - first_unit > 24 or last_note - first_note > 64
+           for (first_unit, first_note), (last_unit, last_note) in zip(cuts, cuts[1:])):
+        # Uncertain timing must not make obtaining the bound another large
+        # unbounded search. Leave such a phrase to the original full search.
+        return None
+    paths = []
+    try:
+        for (first_unit, first_note), (last_unit, last_note) in zip(cuts, cuts[1:]):
+            local_notes = notes[first_note:last_note]
+            paths.append(_search_phrase(
+                units[first_unit:last_unit], local_notes, config,
+                line_windows_by_utterance,
+                required_note_ids.intersection(note.id for note in local_notes),
+            ))
+    except RuntimeError:
+        # A required repeated-vocalization note may need a crossing assignment.
+        # The unrestricted search must still be allowed to find that path.
+        return None
+    omitted = {mid for path in paths for step in path.steps for mid in step.omitted_mora_ids}
+    if any(
+        unit.must_assign and any(mid in omitted for mid in unit.mora_ids)
+        and unit.ctc_onset_sec is not None and any(
+            note.start_sec - .12 <= unit.ctc_onset_sec <= note.end_sec + .12 for note in notes
+        )
+        for unit in units
+    ):
+        # A phase can lack note support locally while a note across the cut
+        # makes it mandatory in the full phrase. Such a seed is not feasible.
+        return None
+    return _join_partition_paths(paths, units, notes, config, line_windows_by_utterance)
+
+
+def _optimize_phrase(
+    units: Sequence[_Unit], notes: Sequence[NoteCandidate], config: NoteRunConfig,
+    line_windows_by_utterance: Mapping[str, tuple[float, float]] | None = None,
+    required_note_ids: frozenset[str] = frozenset(),
+) -> _Path:
+    candidate = _partitioned_candidate(
+        units, notes, config, line_windows_by_utterance, required_note_ids,
+    )
+    return _search_phrase(
+        units, notes, config, line_windows_by_utterance, required_note_ids,
+        complete_path=candidate,
+    )
 
 
 def _resolve_splits(
