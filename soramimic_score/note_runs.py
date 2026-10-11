@@ -647,7 +647,7 @@ def _partitioned_candidate(
     if len(cuts) == 1:
         return None
     cuts.append((len(units), len(notes)))
-    if any(last_unit - first_unit > 24 or last_note - first_note > 48
+    if any(last_unit - first_unit > 24 or last_note - first_note > 64
            for (first_unit, first_note), (last_unit, last_note) in zip(cuts, cuts[1:])):
         # Uncertain timing must not make obtaining the bound another large
         # unbounded search. Leave such a phrase to the original full search.
