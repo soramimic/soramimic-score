@@ -169,10 +169,12 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
                 raise RuntimeError("shared Whisper response is invalid")
             if result.get("requested_language") != "ja":
                 raise RuntimeError("shared Whisper language response is invalid")
+            duration = audio_duration(path)
             previous_end = 0.
             lines = []
             for item in result["lines"]:
-                start, end = max(previous_end, float(item["start_sec"]), 0.), float(item["end_sec"])
+                start = max(previous_end, float(item["start_sec"]), 0.)
+                end = min(duration, float(item["end_sec"]))
                 if str(item["text"]).strip() and end > start:
                     lines.append(LyricLine(str(item["text"]).strip(), start, end))
                     previous_end = end
