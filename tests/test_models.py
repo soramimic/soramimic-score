@@ -114,7 +114,10 @@ class ModelTests(unittest.TestCase):
         audio = self.root / "audio.wav"
         self.write_audio(audio)
         adapters = create_adapters(self.config, vocals_path=audio, shared=Shared())
-        self.assertEqual(adapters.lyric_recognizer(audio), (LyricLine("空", .01, .05),))
+        with patch.dict(sys.modules, {
+            "librosa": SimpleNamespace(get_duration=lambda **kwargs: .1),
+        }):
+            self.assertEqual(adapters.lyric_recognizer(audio), (LyricLine("空", .01, .05),))
         self.assertEqual(adapters.melody_transcriber(audio)[0].midi_pitch, 60)
         with patch.dict(sys.modules, {
             "librosa": SimpleNamespace(load=lambda *args, **kwargs: ([0.] * 1600, 16000)),
@@ -127,6 +130,29 @@ class ModelTests(unittest.TestCase):
         self.assertEqual([kind for kind, *_ in calls],
                          ["whisper", "sheetsage", "whisper", "kana-whisper"])
         self.assertEqual(calls[2][2]["temperature"], 0.)
+
+    def test_shared_recognition_stays_within_audio_before_reading_windows(self):
+        from soramimic_score.readings import grouped_acoustic_windows
+
+        class Shared:
+            def run(self, kind, audio, parameters):
+                return {"requested_language": "ja", "lines": [
+                    {"text": "空", "start_sec": -.2, "end_sec": .5},
+                    {"text": "声", "start_sec": .25, "end_sec": 25.5},
+                    {"text": "範囲外", "start_sec": 25.5, "end_sec": 30.},
+                ]}
+
+        with patch.dict(sys.modules, {
+            "librosa": SimpleNamespace(get_duration=lambda **kwargs: 25.),
+        }):
+            adapters = create_adapters(self.config, shared=Shared())
+            lines = adapters.lyric_recognizer(self.root / "audio.wav")
+        self.assertEqual(lines, (LyricLine("空", 0., .5), LyricLine("声", .5, 25.)))
+        windows, assignments = grouped_acoustic_windows(
+            [(line.start_sec, line.end_sec) for line in lines], range(len(lines)), 25.)
+        self.assertEqual(set(assignments), {0, 1})
+        self.assertTrue(all(0 <= start < end <= 25. for start, end in windows))
+        self.assertEqual(windows[-1][1], 25.)
 
     @staticmethod
     def write_audio(path):
