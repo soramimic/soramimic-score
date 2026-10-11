@@ -8,6 +8,8 @@ from .japanese import kana_to_moras, katakana, phonemes_for_mora
 
 def mora_units(reading):
     """Keep a sound and a duration-bearing vowel for every retained mora."""
+    if reading == "":
+        return ()  # An absent context is not a generated pronunciation.
     units, previous = [], None
     for mora in kana_to_moras(katakana(reading)):
         sounds = phonemes_for_mora(mora, previous)

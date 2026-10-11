@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .document import compile_score, dump, from_linked_observations
 from .ir import IntermediateRepresentation
+from .lyric_input import parse_lyric_input
 
 
 def main() -> int:
@@ -68,8 +69,8 @@ def analyze_main(argv) -> int:
     ):
         parser.error("出力先は入力ファイルと別にしてください")
     try:
-        lyrics = (tuple(line for line in args.lyrics.read_text(encoding="utf-8").splitlines()
-                        if line.strip()) if args.lyrics else None)
+        lyrics = (parse_lyric_input(args.lyrics.read_bytes().decode("utf-8"))
+                  if args.lyrics else None)
         config = ModelConfig(args.sheetsage_model, args.sheetsage_base, args.whisper_model,
                              args.ctc_model, args.device, args.local_files_only,
                              separate_vocals=not args.no_vocal_separation,

@@ -10,7 +10,7 @@ import statistics
 from typing import TYPE_CHECKING
 import unicodedata
 
-from .japanese import kana_to_moras, katakana
+from .japanese import kana_to_moras, katakana, normalize_reading
 
 if TYPE_CHECKING:
     from .audio import LyricLine, MelodyNote
@@ -189,8 +189,10 @@ def expand_repeated_vocalization_from_kana(
     if period is None or line.start_sec is None or line.end_sec is None:
         return None
     source = _vocalization_moras(line.text) or ()
-    evidence = kana_to_moras("".join(re.findall(r"[ァ-ヶー]+",
-                              katakana(evidence_text).replace("ヲ", "オ"))).replace("ー", ""))
+    # Count voiced syllables, deliberately excluding sustained long marks only
+    # after validating the entire observation. Never salvage a partial reading.
+    normalized = normalize_reading(evidence_text).replace("ヲ", "オ").replace("ー", "")
+    evidence = kana_to_moras(normalized) if normalized else ()
     note_count = sum(line.start_sec <= (note.start_sec + note.end_sec) / 2 < line.end_sec
                      for note in notes)
     if not evidence or note_count < 2:

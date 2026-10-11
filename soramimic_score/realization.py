@@ -15,7 +15,7 @@ from typing import Any, Sequence
 
 from .ir import (Evidence, IntermediateRepresentation, NoteCandidate, SingingUnit,
                  has_usable_timing)
-from .japanese import kana_to_syllables
+from .japanese import kana_to_syllables, validate_reading
 
 
 @dataclass(frozen=True)
@@ -115,6 +115,10 @@ class Realization:
             raise ValueError("duplicate performed unit")
         seen: set[str] = set()
         known_lines = {x.utterance_id for x in self.canonical}
+        for line in self.canonical:
+            reading = validate_reading(line.kana)
+            if reading.kana != line.kana or len(reading.moras) != len(line.mora_ids):
+                raise ValueError("canonical kana must contain one normalized mora per mora ID")
         known_moras = {m for x in self.canonical for m in x.mora_ids}
         canonical_moras = [m for x in self.canonical for m in x.mora_ids]
         performed_moras = [m for x in self.performed for m in x.mora_ids]
@@ -132,6 +136,8 @@ class Realization:
                 raise ValueError("invalid performed unit")
         previous_end = 0.0
         for slot in self.synthesis_plan:
+            if validate_reading(slot.kana).kana != slot.kana:
+                raise ValueError("synthesis kana must be normalized")
             if (slot.id in seen or slot.singing_unit_id not in known_units
                     or slot.utterance_id not in known_lines
                     or set(slot.mora_ids) - known_moras
@@ -166,7 +172,7 @@ class Realization:
             by_note.setdefault(slot.note_candidate_id, []).append(slot)
         for note_id, slots in by_note.items():
             kana = "".join(slot.kana for slot in slots if not slot.continuation)
-            if len(kana_to_syllables(kana)) > 1:
+            if kana and len(kana_to_syllables(kana)) > 1:
                 raise ValueError(f"note {note_id} is assigned more than one syllable")
 
 

@@ -44,6 +44,14 @@ class ScoreDocument:
         self.score.validate()
         if self.score.canonical_text != self.observations.canonical_text:
             raise ValidationError("score canonical_text does not match observations")
+        readings = {item.id: item for item in self.observations.readings}
+        expected = [(item.id, item.surface, readings[item.selected_reading_id].kana,
+                     readings[item.selected_reading_id].mora_ids)
+                    for item in self.observations.utterances]
+        actual = [(item.utterance_id, item.text, item.kana, item.mora_ids)
+                  for item in self.score.canonical]
+        if actual != expected:
+            raise ValidationError("score canonical readings do not match observations")
         if self.score.evidence != self.observations.evidence:
             raise ValidationError("score evidence does not match observations")
 

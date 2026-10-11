@@ -41,6 +41,18 @@ def parentheses(text: str) -> tuple[Parenthesis, ...]:
     preserved. Quotation marks may surround either the word or the whole line.
     Finding a candidate is not a decision to remove the parenthetical text.
     """
+    from .lyric_input import parse_lyric_input
+    source = parse_lyric_input(text)
+    return tuple(Parenthesis(
+        *(source.original_boundary(offset) for offset in (
+            item.start, item.end, item.base_start, item.base_end, item.run_start)),
+        item.reading,
+    ) for item in _normalized_parentheses(source.text)
+        if _READING.get(text[source.original_boundary(item.start)])
+        == text[source.original_boundary(item.end) - 1])
+
+
+def _normalized_parentheses(text: str) -> tuple[Parenthesis, ...]:
     if not any(c in text for c in _READING):
         return ()
     stack = []

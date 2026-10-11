@@ -259,6 +259,7 @@ class IntermediateRepresentation:
         return document
 
     def validate(self) -> None:
+        from .japanese import validate_reading
         if type(self.schema_version) is not int or self.schema_version != SCHEMA_VERSION:
             raise ValidationError(f"unsupported schema_version: {self.schema_version!r}")
         if not isinstance(self.canonical_text, str):
@@ -328,6 +329,11 @@ class IntermediateRepresentation:
             if (not item.kana or not item.source or not math.isfinite(item.score)
                     or not 0 <= item.score <= 1):
                 raise ValidationError(f"{item.id} has invalid reading metadata")
+            try:
+                if validate_reading(item.kana).kana != item.kana:
+                    raise ValueError("reading is not normalized")
+            except ValueError as exc:
+                raise ValidationError(f"{item.id} has invalid kana: {exc}") from exc
             evidence_refs(item.id, item.evidence_ids)
             if any(by_id[mora_id].reading_id != item.id for mora_id in item.mora_ids):
                 raise ValidationError(f"{item.id} contains a mora owned by another reading")
@@ -337,6 +343,11 @@ class IntermediateRepresentation:
         for item in self.moras:
             if not isinstance(by_id.get(item.reading_id), Reading) or not item.text:
                 raise ValidationError(f"{item.id} has invalid ownership or text")
+            try:
+                if validate_reading(item.text).moras != (item.text,):
+                    raise ValueError("text must be one normalized mora")
+            except ValueError as exc:
+                raise ValidationError(f"{item.id} has invalid mora: {exc}") from exc
             start, end = item.surface_span
             if not 0 <= start < end <= len(self.canonical_text):
                 raise ValidationError(f"{item.id} has an invalid surface span")

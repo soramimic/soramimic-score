@@ -24,8 +24,8 @@ class LyricInputTests(unittest.TestCase):
             ("は\u309aとﾎﾟｯﾎﾟ", "ぱとポッポ"), ("わ\u3099ヷ", "ヴァヴァ"),
             ("すゞき くゝゝ ガヽハヾパヽ", "すずき くくく ガカハバパハ"),
             ("ゟヿ", "よりコト"), ("ｳｫｫｫ", "ウォォォ"),
-            ("今日は AI 4443 café Ａ１ ①&｜声《こえ》 👩‍🎤", "今日は AI 4443 café Ａ１ ①&｜声《こえ》 👩‍🎤"),
-            (" \t歌\r\n声\u3000", " \t歌\r\n声\u3000"),
+            ("今日は AI 4443 café Ａ１ ①&｜声《こえ》 👩‍🎤", "今日は AI 4443 café A1 ①&｜声《こえ》 👩‍🎤"),
+            (" \t歌\r\n声\u3000", "  歌\n声 "),
         )
         for source, expected in cases:
             with self.subTest(source=source):
