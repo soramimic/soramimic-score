@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from functools import lru_cache
 import re
 import unicodedata
 from typing import Callable, Iterable, Sequence
@@ -12,12 +13,20 @@ import jasyllablesep
 
 SMALL_KANA = frozenset("ァィゥェォャュョヮヵヶ")
 SPECIAL_MORAS = frozenset({"ン", "ッ", "ー"})
-_RUBY = re.compile(r"｜([^《｜]+)《([^《》]+)》")
 
 
 def strip_ruby(text: str) -> str:
     """Keep lyric spelling, removing explicit pronunciation annotations."""
-    return _RUBY.sub(lambda match: match[1], text)
+    from .lyric_input import parse_lyric_input
+    source = parse_lyric_input(text)
+    parts, cursor = [], 0
+    for item in source.annotations:
+        if item.kind == "ruby":
+            start, end = item.source_span
+            parts.extend((text[cursor:start], text[slice(*item.source_surface_span)]))
+            cursor = end
+    parts.append(text[cursor:])
+    return "".join(parts)
 
 
 @dataclass(frozen=True)
@@ -41,21 +50,23 @@ def katakana(text: str) -> str:
                    for char in normalized)
 
 
-def kana_to_moras(reading: str) -> tuple[str, ...]:
-    """Split a kana pronunciation while retaining long marks and special morae."""
+def kana_to_moras(reading: str | ValidatedReading) -> tuple[str, ...]:
+    """Validate a reading at the public boundary, then return all of its morae."""
+    return validate_reading(reading).moras
+
+
+def _split_kana(kana: str) -> tuple[str, ...]:
+    """Internal construction step, used only after the character allowlist check."""
     result: list[str] = []
-    for char in katakana(reading):
-        # Only a base kana and one small vowel form a combined mora. Extra
-        # small kana retain their own sound instead of creating an unsupported
-        # cluster such as ウォォォ; standalone small kana are handled by G2P.
+    for char in kana:
         if char in _SMALL_VOWELS and result and result[-1] in _BASE:
             result[-1] += char
-        elif "ァ" <= char <= "ヶ" or char == "ー":
+        else:
             result.append(char)
     return tuple(result)
 
 
-def kana_to_syllables(reading: str) -> tuple[str, ...]:
+def kana_to_syllables(reading: str | ValidatedReading) -> tuple[str, ...]:
     """Split normalized kana with the pipeline's explicit syllable definition.
 
     ``jasyllablesep`` attaches long marks, closures, and moraic nasals to the
@@ -90,64 +101,25 @@ _STANDALONE_SMALL_KANA = str.maketrans("ァィゥェォャュョヮヵヶ", "ア
 _READING_ALIASES = str.maketrans({
     "ヰ": "イ", "ヱ": "エ", "ヷ": "ヴァ", "ヸ": "ヴィ", "ヹ": "ヴェ", "ヺ": "ヴォ",
 })
-_READING_MARKS = str.maketrans({"゛": "\u3099", "゜": "\u309a", "ゝ": "ヽ", "ゞ": "ヾ"})
 
 
 def normalize_lyric_input(text: str) -> str:
-    """Prepare a copy for G2P without replacing the displayed lyric spelling.
-
-    Keep kanji, Latin letters, digits, punctuation and ruby delimiters. Only
-    kana width, voicing, iteration and ligature spellings are expanded here;
-    applying NFKC to the whole text would also change the ruby delimiter ｜.
-    Errors refer to one-based positions in the original string, before any
-    composition. Tabs and line breaks are allowed; other controls and lone
-    surrogates must never reach native reading engines.
-    """
-    if not isinstance(text, str):
-        raise ValueError("lyric input must be a string")
-    result: list[str] = []
-
-    def invalid(index: int, char: str, reason: str) -> None:
-        raise ValueError(f"{reason} in lyric input at position {index + 1}: "
-                         f"{char!r} (U+{ord(char):04X})")
-
-    for index, original in enumerate(text):
-        if (unicodedata.category(original) == "Cs"
-                or (unicodedata.category(original) == "Cc" and original not in "\t\n\r")):
-            invalid(index, original, "unsupported character")
-        char = (unicodedata.normalize("NFKC", original)
-                if "ｦ" <= original <= "ﾟ" else original)
-        char = {"゛": "\u3099", "゜": "\u309a", "ゟ": "より", "ヿ": "コト"}.get(char, char)
-        if char in {"\u3099", "\u309a"}:
-            previous = result[-1] if result else ""
-            if len(previous) != 1 or not ("ぁ" <= previous <= "ゖ" or "ァ" <= previous <= "ヶ"):
-                invalid(index, original, "voicing mark has no kana base")
-            voiced = unicodedata.normalize("NFC", previous + char)
-            if len(voiced) != 1:
-                # Hiragana わ/ゐ/ゑ/を have no precomposed voiced forms.
-                voiced = unicodedata.normalize("NFC", katakana(previous) + char)
-            if len(voiced) != 1:
-                invalid(index, original, "voicing mark cannot voice its base")
-            result[-1] = voiced
-        elif char in "ゝゞヽヾ":
-            previous = result[-1] if result else ""
-            base = unicodedata.normalize("NFD", previous)[:1]
-            if katakana(base) not in _BASE and base not in {"ゐ", "ゑ", "ヰ", "ヱ"}:
-                invalid(index, original, "kana iteration mark has no repeatable base")
-            repeated = unicodedata.normalize("NFC", base + ("\u3099" if char in "ゞヾ" else ""))
-            if len(repeated) != 1:
-                repeated = unicodedata.normalize("NFC", katakana(base) + "\u3099")
-            if len(repeated) != 1:
-                invalid(index, original, "kana iteration mark cannot voice its base")
-            result.append(repeated)
-        else:
-            result.extend(char)
-    return unicodedata.normalize("NFC", "".join(result).translate(_READING_ALIASES))
+    """Return the validated analysis view; use parse_lyric_input for source offsets."""
+    from .lyric_input import parse_lyric_input
+    return parse_lyric_input(text).text
 
 
-def phonemes_for_mora(mora: str, previous_vowel: str | None = None) -> tuple[str, ...]:
-    """Return a compact Japanese phoneme sequence for one retained mora."""
-    mora = katakana(mora)
+def phonemes_for_mora(
+    mora: str | ValidatedReading, previous_vowel: str | None = None,
+) -> tuple[str, ...]:
+    """Validate and normalize exactly one mora before phoneme conversion."""
+    reading = validate_reading(mora)
+    if len(reading.moras) != 1:
+        raise ValueError(f"expected one Japanese mora: {reading.kana!r}")
+    return _phonemes_for_normalized_mora(reading.moras[0], previous_vowel)
+
+
+def _phonemes_for_normalized_mora(mora: str, previous_vowel: str | None = None) -> tuple[str, ...]:
     # A retained small kana can stand alone at a reading boundary or after a
     # special mora. Normalize only its sound; reading and mora text stay intact.
     if len(mora) == 1:
@@ -171,40 +143,66 @@ def phonemes_for_mora(mora: str, previous_vowel: str | None = None) -> tuple[str
     return tuple(value for value in (consonant, vowel) if value)
 
 
-def normalize_reading(reading: str) -> str:
-    """Normalize a generated kana reading, rejecting unresolved characters.
+class ReadingValidationError(ValueError):
+    def __init__(self, text: str, index: int):
+        self.position = index + 1
+        char = text[index]
+        super().__init__(f"unsupported character in kana reading at position {self.position}: "
+                         f"{char!r} (U+{ord(char):04X})")
 
-    Apply after G2P, never to lyric spelling. Width, script, voicing marks,
-    whitespace, historical kana and kana iteration marks have explicit rules.
-    All retained moras must be pronounceable; unknown text is never filtered
-    out to make a partly readable candidate appear complete.
-    """
+
+@dataclass(frozen=True, slots=True)
+class ValidatedReading:
+    """A complete pronounceable kana sequence; derived values cannot be supplied."""
+
+    original: str
+    kana: str = field(init=False)
+    moras: tuple[str, ...] = field(init=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.original, str):
+            raise ValueError("reading must be a string containing kana")
+        from .lyric_input import _normalize
+
+        text, spans = _normalize(self.original)
+        characters = []
+        for index, char in enumerate(text):
+            if char.isspace():
+                continue
+            for normalized in katakana(char).translate(_READING_ALIASES):
+                if (normalized not in _BASE and normalized not in SMALL_KANA
+                        and normalized not in SPECIAL_MORAS):
+                    position = spans[index][0]
+                    raise ReadingValidationError(self.original, position)
+                characters.append(normalized)
+        kana = "".join(characters)
+        if not kana:
+            raise ValueError("reading must contain a kana pronunciation")
+        moras = _split_kana(kana)
+        if "".join(moras) != kana:
+            raise ValueError("mora segmentation did not consume the complete reading")
+        for mora in moras:
+            _phonemes_for_normalized_mora(mora)
+        object.__setattr__(self, "kana", kana)
+        object.__setattr__(self, "moras", moras)
+
+
+@lru_cache(maxsize=4096)
+def _validated_reading(reading: str) -> ValidatedReading:
+    return ValidatedReading(reading)
+
+
+def validate_reading(reading: str | ValidatedReading) -> ValidatedReading:
+    if isinstance(reading, ValidatedReading):
+        return reading
     if not isinstance(reading, str):
         raise ValueError("reading must be a string containing kana")
-    compact = "".join(char for char in reading if not char.isspace())
-    # Compose again after hiragana -> katakana (わ + combining dakuten -> ヷ).
-    kana = unicodedata.normalize("NFC", katakana(compact.translate(_READING_MARKS)))
-    expanded: list[str] = []
-    for index, char in enumerate(kana):
-        if char in "ヽヾ":
-            previous = expanded[-1] if expanded else ""
-            base = unicodedata.normalize("NFD", previous)[:1]
-            if base not in _BASE and base not in {"ヰ", "ヱ"}:
-                raise ValueError(f"kana iteration mark has no repeatable base at position {index + 1}")
-            char = unicodedata.normalize("NFC", base + ("\u3099" if char == "ヾ" else ""))
-            if len(char) != 1:
-                raise ValueError(f"kana iteration mark cannot voice its base at position {index + 1}")
-        expanded.append(char)
-    normalized = "".join(expanded).translate(_READING_ALIASES)
-    if not normalized:
-        raise ValueError("reading must contain a kana pronunciation")
-    for index, char in enumerate(normalized):
-        if char not in _BASE and char not in SMALL_KANA and char not in SPECIAL_MORAS:
-            raise ValueError(f"unsupported character in kana reading at position {index + 1}: "
-                             f"{char!r} (U+{ord(char):04X})")
-    for mora in kana_to_moras(normalized):
-        phonemes_for_mora(mora)
-    return normalized
+    return _validated_reading(reading)
+
+
+def normalize_reading(reading: str) -> str:
+    """Normalize and validate the entire generated reading, never lyric spelling."""
+    return validate_reading(reading).kana
 
 
 def mora_vowel(mora: str, previous_vowel: str | None = None) -> str | None:
@@ -249,7 +247,8 @@ def spans_from_ruby_text(marked_text: str, g2p: G2P = simple_kana_reading) -> tu
     Non-ruby chunks are passed to ``g2p``. A ruby reading is a strong candidate,
     while distinct G2P alternatives are retained for later acoustic selection.
     """
-    normalize_lyric_input(marked_text)  # Validate original positions before splitting.
+    from .lyric_input import parse_lyric_input
+    source = parse_lyric_input(marked_text)
     spans: list[LyricSpan] = []
     plain_parts: list[str] = []
     plain_offset = 0
@@ -276,10 +275,14 @@ def spans_from_ruby_text(marked_text: str, g2p: G2P = simple_kana_reading) -> tu
         spans.append(LyricSpan(surface, (start, plain_offset), tuple(unique.values())))
 
     cursor = 0
-    for match in _RUBY.finditer(marked_text):
-        add(marked_text[cursor:match.start()], g2p(normalize_lyric_input(marked_text[cursor:match.start()])))
-        surface, ruby = match.groups()
-        add(surface, (ReadingCandidate(ruby, "explicit-ruby", 1.0), *g2p(normalize_lyric_input(surface))))
-        cursor = match.end()
+    for item in source.annotations:
+        if item.kind != "ruby":
+            continue
+        start, end = item.source_span
+        add(marked_text[cursor:start], g2p(normalize_lyric_input(marked_text[cursor:start])))
+        surface = marked_text[slice(*item.source_surface_span)]
+        add(surface, (ReadingCandidate(item.reading, "explicit-ruby", 1.0),
+                      *g2p(normalize_lyric_input(surface))))
+        cursor = end
     add(marked_text[cursor:], g2p(normalize_lyric_input(marked_text[cursor:])))
     return "".join(plain_parts), tuple(spans)

@@ -26,7 +26,8 @@ def fixture_readings(text):
                              '夢': 'ユメ', '杜': 'モリ', '僕': 'ボク', '願い': 'ネガイ'}.items():
         text = text.replace(surface, reading)
     text = ''.join(c for c in katakana(text)
-                   if not c.isspace() and unicodedata.category(c)[0] not in 'PZC')
+                   if not c.isspace() and c not in '≪≫'
+                   and unicodedata.category(c)[0] not in 'PZC')
     return (text,)
 
 

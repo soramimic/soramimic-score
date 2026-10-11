@@ -23,6 +23,7 @@ from .exports import EXPORTS
 from .models import ModelConfig
 from .ir import has_usable_timing
 from .media import AUDIO_SUFFIXES, decode_audio, probe_audio
+from .lyric_input import LyricInputError, parse_lyric_input
 
 
 MAX_WAV_BYTES = 100 * 1024 * 1024
@@ -143,15 +144,15 @@ def create_app(*, data_root: Path | None = None, analyzer=None, public: bool | N
                 romaji_model=Path(os.environ["SORAMIMIC_SCORE_ROMAJI_MODEL"])
                     if os.environ.get("SORAMIMIC_SCORE_ROMAJI_MODEL") else None,
             )
-            lyrics = tuple(line for line in (job_dir / "lyrics.txt").read_text(
-                encoding="utf-8").splitlines() if line.strip()) if supplied else None
+            lyrics = parse_lyric_input((job_dir / "lyrics.txt").read_bytes().decode("utf-8")) if supplied else None
             if analyzer is None:
                 result = analyze_audio(job_dir / "input.wav", model_config=config,
                                        lyrics=lyrics, on_progress=progress,
                                        accompaniment_path=job_dir / "accompaniment.flac")
             else:
                 progress("音源を解析しています")
-                result = analyzer(job_dir / "input.wav", model_config=config, lyrics=lyrics)
+                result = analyzer(job_dir / "input.wav", model_config=config,
+                                  lyrics=lyrics.lyric_lines if lyrics is not None else None)
             progress("書き出しを準備しています")
             dump(result, job_dir / "score.json")
             from .resing import available
@@ -168,7 +169,9 @@ def create_app(*, data_root: Path | None = None, analyzer=None, public: bool | N
         except Exception as exc:
             logger.exception("score analysis failed for job %s", job)
             message = "解析に失敗しました。音源と設定を確認してください"
-            if isinstance(exc, AudioPipelineError):
+            if isinstance(exc, LyricInputError):
+                message = f"入力歌詞の{exc.line}行{exc.column}文字目を確認してください: {exc}"
+            elif isinstance(exc, AudioPipelineError):
                 if exc.stage == "melody" and "no melody notes were produced" in str(exc):
                     message = "歌唱の音符を検出できませんでした。別の歌唱音源をお試しください"
                 elif exc.stage == "melody" and "At least two decoded beats" in str(exc):

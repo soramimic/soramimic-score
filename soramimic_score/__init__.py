@@ -58,7 +58,10 @@ from .japanese import (
     normalize_reading,
     phonemes_for_mora,
     spans_from_ruby_text,
+    ValidatedReading,
+    validate_reading,
 )
+from .lyric_input import LyricAnnotation, LyricInput, LyricInputError, LyricMappingError, parse_lyric_input
 from .note_runs import (
     NoteOnlySpan,
     NoteRunAssignment,
@@ -95,6 +98,10 @@ __all__ = [
     "Link",
     "LinkCost",
     "LyricSpan",
+    "LyricAnnotation",
+    "LyricInput",
+    "LyricInputError",
+    "LyricMappingError",
     "LyricLine",
     "LyricAdjustment",
     "Mora",
@@ -116,6 +123,7 @@ __all__ = [
     "SingingUnit",
     "Utterance",
     "ValidationError",
+    "ValidatedReading",
     "VowelNucleus",
     "VocalizationExpansion",
     "VocalizationReattack",
@@ -133,6 +141,8 @@ __all__ = [
     "kana_to_moras",
     "normalize_reading",
     "normalize_lyric_input",
+    "parse_lyric_input",
+    "validate_reading",
     "kana_to_syllables",
     "mora_distance",
     "load",

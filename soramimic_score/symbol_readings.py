@@ -7,7 +7,8 @@ from collections import Counter
 import math
 import re
 
-from .japanese import _RUBY, kana_to_moras, katakana, normalize_lyric_input
+from .japanese import kana_to_moras, katakana, normalize_lyric_input
+from .lyric_input import parse_lyric_input
 from .mora_gap import align_mora_gap
 
 
@@ -17,7 +18,7 @@ def symbol_slots(text, reading):
     Failure to map a span is retained as evidence.  It is never permission to
     rewrite the surrounding lexical reading.
     """
-    normalize_lyric_input(text)  # Symbol spans below stay in original coordinates.
+    parsed = parse_lyric_input(text)  # Symbol spans below stay in original coordinates.
     try:
         import soramimic_yomi as yomi
     except ImportError:
@@ -26,7 +27,7 @@ def symbol_slots(text, reading):
     find = getattr(yomi, "get_symbol_spans", None)
     if find is None:
         return ()
-    ruby = tuple((match.start(), match.end()) for match in _RUBY.finditer(text))
+    ruby = tuple(item.source_span for item in parsed.annotations if item.kind == "ruby")
     output = []
     # Spacing voicing marks belong to their kana, not to a neighboring symbol.
     # Use combining marks for this scan only; one-for-one replacement preserves
@@ -52,8 +53,7 @@ def symbol_slots(text, reading):
 
 
 def _moras(text):
-    kana = "".join(re.findall(r"[ァ-ヶー]+", katakana(text)))
-    return tuple(kana_to_moras(kana))
+    return kana_to_moras(text) if text else ()
 
 
 @lru_cache(maxsize=4096)
@@ -118,7 +118,13 @@ def symbol_reading_proposals(reading, slots, transcripts):
             continue
         view_choices = []
         for view, text in transcripts.items():
-            observed = _moras(text)
+            try:
+                observed = _moras(text)
+            except ValueError as exc:
+                row["views"][view] = {"anchor_cost": None, "readings": [],
+                                      "reason": "invalid-reading", "error": str(exc)}
+                view_choices.append([])
+                continue
             matches = []
             if len(observed) > 512:
                 row["views"][view] = {"anchor_cost": None, "readings": []}
@@ -200,7 +206,10 @@ def _gap_readings(left, right, text):
     At least nine surrounding moras remain; candidate names never influence
     where the anchors are placed.
     """
-    observed = _moras(text)
+    try:
+        observed = _moras(text)
+    except ValueError as exc:
+        return {"readings": [], "reason": "invalid-transcript-reading", "error": str(exc)}
     if not observed or len(observed) > 512:
         return {"readings": [], "reason": "missing-or-excessive-transcript"}
     aligned = align_mora_gap(left, right, text)

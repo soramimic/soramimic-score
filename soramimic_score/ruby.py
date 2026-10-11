@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from .japanese import katakana, normalize_lyric_input
+from .lyric_input import parse_lyric_input
 
 
 _KANA = frozenset(chr(code) for code in range(0x3041, 0x3097)) | frozenset(
@@ -125,18 +126,15 @@ def ruby_segments(text: str, selected_kana: str) -> list[dict[str, str]]:
     """Keep selected readings while placing partial ruby like Video subtitles."""
     if not text:
         return []
-    normalized = normalize_lyric_input(text)
-    if normalized != text:
-        # Changed character counts need an explicit token-to-original map.
-        # Preserve the original display instead of guessing ruby boundaries.
-        return [{"text": text, "reading": ""}]
+    source = parse_lyric_input(text)
     try:
         from soramimic_yomi import get_tokens
-        tokens = get_tokens(text, apply_rules=True)
+        tokens = [{**token, "surface_form": normalize_lyric_input(token["surface_form"])}
+                  for token in get_tokens(source.text, apply_rules=True)]
     except Exception:
         return [{"text": text, "reading": ""}]
     readings = [token["pronunciation"] for token in tokens]
-    if "".join(token["surface_form"] for token in tokens) != text:
+    if "".join(token["surface_form"] for token in tokens) != source.text:
         return [{"text": text, "reading": ""}]
     if katakana("".join(readings)) != katakana(selected_kana):
         # Keep ruby when the selected singing pronunciation changes one token.
@@ -155,6 +153,17 @@ def ruby_segments(text: str, selected_kana: str) -> list[dict[str, str]]:
             if readings is None:
                 return [{"text": text, "reading": ""}]
     if katakana("".join(readings)) == katakana(selected_kana):
-        return [part for token, reading in zip(tokens, readings, strict=True)
-                for part in _token_segments(token["surface_form"], reading)]
+        pieces = [part for token, reading in zip(tokens, readings, strict=True)
+                  for part in _token_segments(token["surface_form"], reading)]
+        result, cursor = [], 0
+        for part in pieces:
+            end = cursor + len(part["text"])
+            try:
+                start_original, end_original = source.original_span(cursor, end)
+            except ValueError:
+                return [{"text": text, "reading": ""}]
+            result.append({**part, "text": text[start_original:end_original]})
+            cursor = end
+        if cursor == len(source.text) and "".join(part["text"] for part in result) == text:
+            return result
     return [{"text": text, "reading": ""}]

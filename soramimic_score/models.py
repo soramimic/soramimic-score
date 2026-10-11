@@ -27,6 +27,22 @@ from .symbol_readings import symbol_slots, symbol_reading_proposals, refine_symb
 logger = logging.getLogger(__name__)
 
 
+def _ctc_kana_aliases(vocab):
+    """Select pronounceable single-character tokens from a mixed model vocabulary."""
+    aliases = {}
+    for char, index in vocab.items():
+        normalized = katakana(char)
+        if len(normalized) != 1:
+            continue
+        try:
+            kana_to_moras(normalized)
+        except ValueError:
+            # Padding, separators and punctuation are model tokens, not lyrics.
+            continue
+        aliases.setdefault(normalized, []).append(index)
+    return aliases
+
+
 def _ctc_token_id(char, token_ids):
     """Use full-size aliases for kana absent from the standard CTC vocabulary."""
     if char in token_ids:
@@ -302,11 +318,7 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
                 probs = torch.log_softmax(torch.cat(logits), dim=-1)
                 blank = model.config.pad_token_id
                 # Both scripts denote the same acoustic token; combine their mass.
-                aliases = {}
-                for char, index in vocab.items():
-                    normalized = katakana(char)
-                    if len(normalized) == 1 and kana_to_moras(normalized):
-                        aliases.setdefault(normalized, []).append(index)
+                aliases = _ctc_kana_aliases(vocab)
                 token_ids = {}
                 for char, indices in aliases.items():
                     target = vocab.get(char, indices[0])

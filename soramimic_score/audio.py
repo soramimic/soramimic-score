@@ -25,6 +25,7 @@ from .ir import Boundary, Evidence, IntermediateRepresentation, NoteCandidate
 from .japanese import (LyricSpan, ReadingCandidate, kana_to_moras, mora_vowel,
                        normalize_lyric_input, normalize_reading)
 from .line_windows import snap_line_windows_to_rests
+from .lyric_input import LyricInput, parse_lyric_input
 from .local_recovery import (adjacent_repeat_groups,
                              coalesce_repeated_suffix_fragments, deficit_windows,
                              duration_repeated_vocalization_candidate,
@@ -319,6 +320,10 @@ def build_audio_observations(
     evidence: list[Evidence] = []
     offset = 0
     for index, (line, reading) in enumerate(zip(lines, readings, strict=True)):
+        evidence.append(Evidence(
+            f"audio-input-{index}", "soramimic_score.lyric_input", "lyric-input", 1.,
+            {"stage": "canonical", **parse_lyric_input(line.text).to_dict()},
+        ))
         evidence_ids = ()
         if reading.candidates or reading.detail:
             evidence_id = f"audio-reading-{index}"
@@ -406,7 +411,7 @@ def analyze_audio(
     audio_path: str | Path,
     adapters: AudioAdapters | None = None,
     *,
-    lyrics: Sequence[str] | None = None,
+    lyrics: Sequence[str] | LyricInput | None = None,
     model_config: ModelConfig | None = None,
     adjust_lyrics: bool = False,
     on_progress: Callable[[str], None] | None = None,
@@ -430,6 +435,9 @@ def analyze_audio(
         raise ValueError("Specify adapters or model_config, not both")
     if adjust_lyrics and lyrics is None:
         raise ValueError("adjust_lyrics requires supplied lyrics")
+    supplied_input = lyrics if isinstance(lyrics, LyricInput) else None
+    if supplied_input is not None:
+        lyrics = supplied_input.lyric_lines
     if lyrics is not None:
         if isinstance(lyrics, (str, bytes)):
             raise TypeError("lyrics must be a sequence of lines, not one string")
@@ -449,7 +457,8 @@ def analyze_audio(
                            prepared_adapters(prepared_path, model_config,
                                              accompaniment_path=accompaniment_path))
             with preparation as prepared:
-                return analyze_audio(prepared_path, prepared, lyrics=lyrics,
+                return analyze_audio(prepared_path, prepared,
+                                     lyrics=supplied_input if supplied_input is not None else lyrics,
                                      adjust_lyrics=adjust_lyrics, on_progress=on_progress)
 
     reading_selector = (adapters.automatic_reading_selector
@@ -474,6 +483,17 @@ def analyze_audio(
                             allow_empty=allow_spoken or lyrics is not None)
     recognized_lines = []
     semantic_evidence = []
+
+    def repetition_expansion(line, text, view):
+        try:
+            return expand_repeated_vocalization_from_kana(line, text, notes)
+        except ValueError as exc:
+            semantic_evidence.append(Evidence(
+                f"audio-invalid-repeat-{len(semantic_evidence)}", "soramimic_score.local_recovery",
+                "lyric-repetition-evidence", 0.,
+                {"status": "invalid-reading", "view": view, "text": text, "error": str(exc)},
+            ))
+            return None
     credit_recovered: set[LyricLine] = set()
 
     def readable(text: str) -> bool:
@@ -650,8 +670,7 @@ def analyze_audio(
                     continue
                 if len(evidence_texts) != 1:
                     continue
-                expanded = expand_repeated_vocalization_from_kana(
-                    grouped, evidence_texts[0], notes)
+                expanded = repetition_expansion(grouped, evidence_texts[0], view)
                 if expanded is None:
                     continue
                 ctc = repeat_ctc(expanded)
@@ -699,8 +718,7 @@ def analyze_audio(
                 if len(evidence_texts) != len(candidate_indices):
                     continue
                 for index, evidence_text in zip(candidate_indices, evidence_texts, strict=True):
-                    expanded = expand_repeated_vocalization_from_kana(
-                        recognized[index], evidence_text, notes)
+                    expanded = repetition_expansion(recognized[index], evidence_text, view)
                     if expanded is None:
                         continue
                     ctc = repeat_ctc(expanded)
@@ -723,9 +741,16 @@ def analyze_audio(
         def count_moras(text: str) -> int:
             try:
                 reading = adapters.lyric_reading(text) if adapters.lyric_reading else text
-            except ValueError:
-                reading = text
-            return len(kana_to_moras(reading))
+                return len(kana_to_moras(reading))
+            except ValueError as exc:
+                # No pronunciation estimate is available for this optional
+                # retry heuristic. Do not count just the kana in mixed text.
+                semantic_evidence.append(Evidence(
+                    f"audio-reading-count-{len(semantic_evidence)}", "soramimic_score.audio",
+                    "lyric-reading-count", 0.,
+                    {"text": text, "status": "unavailable", "error": str(exc)},
+                ))
+                return 0
 
         def retry(start: float, end: float) -> tuple[LyricLine, ...]:
             try:
@@ -1083,8 +1108,7 @@ def analyze_audio(
                                 continue
                             for source_line, evidence_text in zip(
                                     repeated, evidence_texts, strict=True):
-                                expanded = expand_repeated_vocalization_from_kana(
-                                    source_line, evidence_text, notes)
+                                expanded = repetition_expansion(source_line, evidence_text, view)
                                 if expanded is None:
                                     continue
                                 try:
@@ -1318,6 +1342,13 @@ def analyze_audio(
     if semantic_evidence:
         observations = replace(observations,
                                evidence=observations.evidence + tuple(semantic_evidence))
+    if lyrics is not None:
+        input_detail = ({"input": supplied_input.to_dict()} if supplied_input is not None else
+                        {"lines": [parse_lyric_input(text).to_dict() for text in lyrics]})
+        observations = replace(observations, evidence=observations.evidence + (Evidence(
+            "audio-supplied-input", "soramimic_score.lyric_input", "lyric-input", 1.,
+            {"stage": "supplied", **input_detail},
+        ),))
     if adjust_lyrics and overlay is not None:
         observations = replace(observations, evidence=observations.evidence + (Evidence(
             "audio-lyric-adjustment", "soramimic_score.lyrics", "lyric-adjustment", 0.0,

@@ -11,8 +11,9 @@ from threading import Lock
 import unicodedata
 
 from .audio import LyricLine, ReadingSelection
-from .japanese import (_RUBY, kana_to_moras, katakana, mora_vowel,
+from .japanese import (kana_to_moras, katakana, mora_vowel,
                        normalize_lyric_input, normalize_reading)
+from .lyric_input import parse_lyric_input
 
 
 _YOMI_LOCK = Lock()
@@ -74,10 +75,11 @@ def _automatic_candidates(text, candidates):
     return tuple(unique)
 
 
-def _node_reading(node):
-    parts, surfaces = [], []
+def _node_reading(node, *, lyric_input=None):
+    parts, surfaces, consumed = [], [], []
     while node is not None:
         if node.surface:
+            consumed.append(node.surface)
             fields = next(csv.reader([node.feature]))
             if fields[0] != "補助記号":
                 pronunciation = fields[9] if len(fields) > 9 else "*"
@@ -90,6 +92,8 @@ def _node_reading(node):
                 parts.append(kana)
                 surfaces.append(node.surface)
         node = node.next
+    if lyric_input is not None:
+        lyric_input.match_parts(tuple(surface for surface in consumed if surface.strip()))
     if not parts:
         raise ValueError("No Japanese pronunciation in lyric line")
     return "".join(parts), tuple(surfaces)
@@ -103,8 +107,9 @@ def dictionary_candidates(lines):
     tagger = MeCab.Tagger(f'-d "{unidic_lite.DICDIR}"')
     output = []
     for line in lines:
-        text = normalize_lyric_input(line.text)
-        primary, _ = _node_reading(tagger.parseToNode(text))
+        parsed = parse_lyric_input(line.text)
+        text = parsed.text
+        primary, _ = _node_reading(tagger.parseToNode(text), lyric_input=parsed)
         candidates = [primary]
         tagger.parseNBestInit(text)
         for _ in range(8):
@@ -112,7 +117,7 @@ def dictionary_candidates(lines):
             if node is None:
                 break
             try:
-                kana, _ = _node_reading(node)
+                kana, _ = _node_reading(node, lyric_input=parsed)
             except ValueError:
                 # An unknown alternative must not invalidate the primary reading.
                 continue
@@ -132,11 +137,15 @@ def dictionary_readings(_path, lines, *, automatic=False):
 
     output = []
     for line in lines:
-        text = normalize_lyric_input(line.text)
-        input_detail = ({"lyric_input_normalization": {
+        parsed = parse_lyric_input(line.text)
+        text = parsed.text
+        input_detail = {"lyric_input": parsed.to_dict()}
+        if text != line.text:
+            input_detail["lyric_input_normalization"] = {
             "original_text": line.text, "normalized_text": text,
-        }} if text != line.text else {})
-        if _RUBY.search(line.text):
+            }
+        annotations = tuple(item for item in parsed.annotations if item.kind == "ruby")
+        if annotations:
             from .inferred_readings import inferred_candidates, inferred_reading_slots
 
             parts = []
@@ -144,8 +153,8 @@ def dictionary_readings(_path, lines, *, automatic=False):
             inferred_slots = []
             kana_offset = 0
             cursor = 0
-            for match in [*_RUBY.finditer(line.text), None]:
-                end = match.start() if match is not None else len(line.text)
+            for annotation in [*annotations, None]:
+                end = annotation.source_span[0] if annotation is not None else len(line.text)
                 plain = line.text[cursor:end]
                 if any(not c.isspace() and unicodedata.category(c)[0] not in "PZC"
                        for c in plain):
@@ -161,15 +170,12 @@ def dictionary_readings(_path, lines, *, automatic=False):
                             "kana_end": (kana_offset + slot["kana_end"]
                                          if slot["mapped"] else None)})
                     kana_offset += len(selected.kana)
-                if match is not None:
-                    try:
-                        kana = normalize_reading(match[2])
-                    except ValueError as exc:
-                        raise ValueError(f"Explicit ruby must contain a kana pronunciation: {exc}") from exc
+                if annotation is not None:
+                    kana = annotation.reading
                     parts.append((kana,))
                     part_selections.append(ReadingSelection(kana, "explicit-ruby", 1., (kana,)))
                     kana_offset += len(kana)
-                    cursor = match.end()
+                    cursor = annotation.source_span[1]
             # Bound the combinatorial generator by order, never by mora count.
             rows = tuple(islice(product(*parts), 32))
             candidates = tuple(dict.fromkeys("".join(row) for row in rows))
@@ -231,7 +237,7 @@ def dictionary_readings(_path, lines, *, automatic=False):
 
 def _comparison_kana(text, *, evidence=False):
     """Apply Video's kana comparison normalization to a closed reading."""
-    kana = "".join(re.findall(r"[ァ-ヶー]+", katakana(text))).replace("ヲ", "オ")
+    kana = normalize_reading(text).replace("ヲ", "オ") if text.strip() else ""
     small_vowels = {"ァ": "ア", "ィ": "イ", "ゥ": "ウ", "ェ": "エ",
                     "ォ": "オ", "ヮ": "ワ"}
     small_moras = {**small_vowels, "ャ": "ヤ", "ュ": "ユ", "ョ": "ヨ"}
@@ -284,8 +290,17 @@ def token_reading_proposals(surface_text, default_reading, evidence=None):
     if _comparison_kana("".join(pieces)) != _comparison_kana(default_reading):
         return ()
     default_vowels = _vowels(default_reading)
-    keys = (tuple("".join(_kana_distance().preprocess_func(_comparison_kana(text, evidence=True)))
-                  for text in evidence) if evidence is not None else None)
+    keys = None
+    if evidence is not None:
+        keys = []
+        for text in evidence:
+            try:
+                keys.append("".join(_kana_distance().preprocess_func(
+                    _comparison_kana(text, evidence=True))))
+            except ValueError:
+                # Unusable observations cannot support a proposal. The acoustic
+                # selection records each rejected transcript and its error.
+                continue
     proposals = []
     seen = {_comparison_kana(default_reading)}
     for index, (surface, reading) in enumerate(tokens):
@@ -352,13 +367,15 @@ def select_acoustic_reading(candidates, transcripts, *, inferred_candidates=()):
     """
     if not candidates:
         raise ValueError("At least one dictionary candidate is required")
+    candidates = tuple(normalize_reading(candidate) for candidate in candidates)
     detail = {"transcripts": dict(transcripts), "confidence_available": False,
               "distance": "kanasim-weighted-substring-0.0.11", "reason": "no-acoustic-evidence"}
     evidence = {}
     for view, text in transcripts.items():
         try:
             moras = _comparison_kana(text, evidence=True)
-        except ValueError:
+        except ValueError as exc:
+            detail.setdefault("invalid_transcripts", {})[view] = str(exc)
             continue
         if moras:
             evidence[view] = moras
