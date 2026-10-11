@@ -12,7 +12,10 @@ from soramimic_score import (
 )
 from soramimic_score.audio import AudioPipelineError, _validate_lines
 from soramimic_score.japanese import kana_to_moras
-from soramimic_score.readings import dictionary_candidates, dictionary_readings, token_reading_proposals
+from soramimic_score.lyric_input import parse_lyric_input
+from soramimic_score.readings import (
+    _node_reading, dictionary_candidates, dictionary_readings, token_reading_proposals,
+)
 from soramimic_score.ruby import ruby_segments
 from soramimic_score.symbol_readings import _lexical_transcript, symbol_slots
 
@@ -66,6 +69,20 @@ class LyricInputTests(unittest.TestCase):
             self.assertEqual(dictionary_candidates((LyricLine("カ゛クセイ"),)), (("ガクセイ",),))
         tagger.parseToNode.assert_called_once_with("ガクセイ")
         tagger.parseNBestInit.assert_called_once_with("ガクセイ")
+
+    def test_dictionary_whitespace_nodes_do_not_invalidate_readings_or_coverage(self):
+        def node(surface, pronunciation, next=None):
+            fields = ["名詞"] + ["*"] * 8 + [pronunciation]
+            return SimpleNamespace(surface=surface, feature=",".join(fields), next=next)
+
+        for space in (" ", "\u3000", "\t", "\n"):
+            with self.subTest(space=space):
+                text = "空" + space + "海"
+                nodes = node("空", "ソラ", node(space, "*", node("海", "ウミ")))
+                self.assertEqual(_node_reading(nodes, lyric_input=parse_lyric_input(text)),
+                                 ("ソラウミ", ("空", "海")))
+                with self.assertRaisesRegex(ValueError, "surface-mismatch"):
+                    _node_reading(nodes, lyric_input=parse_lyric_input("空星海"))
 
     def test_invalid_input_never_reaches_yomi_or_an_alternative_dictionary(self):
         yomi, unidic = Mock(), Mock()
