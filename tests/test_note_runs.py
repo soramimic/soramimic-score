@@ -91,6 +91,149 @@ def preserving_config(**changes):
 
 
 class NoteRunOptimizationTests(unittest.TestCase):
+    def test_partitioned_candidate_reduces_search_without_changing_result(self):
+        size = 24
+        source = document(
+            "カ" * size, tuple(index * .2 for index in range(size)),
+            tuple(note(f"n{index}", index * .2, index * .2 + .18, 60 + index % 2)
+                  for index in range(size)),
+        )
+        with patch.object(note_runs, "_partitioned_candidate", return_value=None), \
+                patch.object(note_runs, "_assignment_cost",
+                             wraps=note_runs._assignment_cost) as before:
+            expected = optimize_note_runs(source)
+        with patch.object(note_runs, "_partitioned_candidate",
+                          wraps=note_runs._partitioned_candidate) as partitions, \
+                patch.object(note_runs, "_assignment_cost",
+                             wraps=note_runs._assignment_cost) as after:
+            actual = optimize_note_runs(source)
+        self.assertEqual(actual, expected)
+        self.assertEqual(partitions.call_count, 1)
+        self.assertLess(after.call_count, before.call_count / 3)
+
+    def test_partition_boundary_can_reuse_and_split_preceding_note(self):
+        onsets = [index + .05 for index in range(24)]
+        onsets[12] = 11.5
+        notes = tuple(note(f"n{index}", index, index + .98,
+                           65 if index in (11, 12) else 60 + index % 2)
+                      for index in range(24))
+        source = document("カ" * 24, onsets, notes)
+        units = note_runs._units(source, None)[0][1]
+        settings = NoteRunConfig()
+        candidate = note_runs._partitioned_candidate(
+            units, source.note_candidates, settings, None, frozenset(),
+        )
+        self.assertIsNotNone(candidate)
+        with patch.object(note_runs, "_partitioned_candidate", return_value=None):
+            expected = optimize_note_runs(source)
+        actual = optimize_note_runs(source)
+        self.assertEqual(actual, expected)
+        crossing = actual.assignments[12]
+        self.assertTrue(crossing.source_note_split)
+        self.assertEqual(crossing.notes[0].source_note_ids, ("n11", "n12"))
+        self.assertEqual(crossing.notes[0].start_sec, 11.5)
+        self.assertLess(actual.total_cost, candidate.cost.total)
+
+    def test_partitioning_keeps_global_zero_cost_tie_order(self):
+        source = document(
+            "カ" * 24, tuple(index + .05 for index in range(24)),
+            tuple(note(f"n{index}", index, index + .98) for index in range(24)),
+        )
+        settings = NoteRunConfig(**{
+            key: 0.0 for key in asdict(NoteRunConfig())
+            if key.endswith("weight") or key.endswith("sec2")
+        })
+        with patch.object(note_runs, "_partitioned_candidate", return_value=None):
+            expected = optimize_note_runs(source, settings)
+        actual = optimize_note_runs(source, settings)
+        self.assertEqual(actual, expected)
+        self.assertEqual(actual.total_cost, 0)
+
+    def test_partition_join_replays_gaps_and_segment_rest_costs(self):
+        notes = [note(f"n{index}", index, index + .4) for index in range(24)]
+        notes += [note("extra-left", 11.45, 11.5, 70),
+                  note("extra-right", 11.55, 11.6, 70)]
+        notes.sort(key=lambda value: value[1])
+        source = document(
+            "カ" * 24, tuple(index + .05 for index in range(24)),
+            notes,
+        )
+        segments = {mora.id: "same-segment" for mora in source.moras}
+        units = note_runs._units(source, segments)[0][1]
+        settings = NoteRunConfig(
+            pitch_change_weight=20, within_syllable_rest_open_weight=20,
+            within_syllable_rest_duration_weight=20, note_only_open_weight=.1,
+            note_only_duration_weight=.1, ctc_onset_weight=1, mora_omission_weight=10,
+        )
+        candidate = note_runs._partitioned_candidate(
+            units, source.note_candidates, settings, None, frozenset(),
+        )
+        full = note_runs._search_phrase(units, source.note_candidates, settings)
+        self.assertIsNotNone(candidate)
+        self.assertGreaterEqual(candidate.cost.total, full.cost.total)
+        self.assertEqual(note_runs._optimize_phrase(
+            units, source.note_candidates, settings,
+        ), full)
+        self.assertGreater(full.cost.segment_rest, 0)
+        self.assertEqual(candidate.cost.note_only_open, .1)
+        self.assertEqual(
+            [(step.note_only_span.source_note_ids, step.note_only_span.position)
+             for step in candidate.steps if step.note_only_span],
+            [(('extra-left', 'extra-right'), 'internal')],
+        )
+
+    def test_partitions_preserve_required_repeated_vocalization_notes(self):
+        source = document(
+            "カ" * 24, tuple(index + .05 for index in range(24)),
+            tuple(note(f"n{index}", index, index + .98) for index in range(24)),
+        )
+        units = tuple(replace(unit, must_assign=True, independent_phase=True)
+                      for unit in note_runs._units(source, None)[0][1])
+        required = frozenset(note.id for note in source.note_candidates)
+        config = NoteRunConfig()
+        expected = note_runs._search_phrase(
+            units, source.note_candidates, config, required_note_ids=required,
+        )
+        actual = note_runs._optimize_phrase(
+            units, source.note_candidates, config, required_note_ids=required,
+        )
+        self.assertEqual(actual, expected)
+        self.assertFalse(any(step.omitted_mora_ids or step.note_only_span for step in actual.steps))
+
+    def test_partition_cannot_omit_phase_supported_across_cut(self):
+        onsets = [index + .05 for index in range(24)]
+        onsets[12] = 11.5
+        source = document(
+            "カ" * 24, onsets,
+            tuple(note(f"n{index}", index, index + .98, 60 + index % 2)
+                  for index in range(24)),
+        )
+        units = list(note_runs._units(source, None)[0][1])
+        units[12] = replace(units[12], must_assign=True, independent_phase=True)
+        config = NoteRunConfig(mora_omission_weight=0)
+        self.assertIsNone(note_runs._partitioned_candidate(
+            units, source.note_candidates, config, None, frozenset(),
+        ))
+        expected = note_runs._search_phrase(units, source.note_candidates, config)
+        actual = note_runs._optimize_phrase(units, source.note_candidates, config)
+        self.assertEqual(actual, expected)
+        self.assertFalse(any(
+            units[12].mora_ids == step.omitted_mora_ids for step in actual.steps
+        ))
+
+    def test_large_uncertain_partition_does_not_launch_another_large_search(self):
+        source = document(
+            "カ" * 24, tuple(index * .1 for index in range(24)),
+            tuple(note(f"n{index}", index * .1, index * .1 + .09)
+                  for index in range(100)),
+        )
+        units = note_runs._units(source, None)[0][1]
+        with patch.object(note_runs, "_search_phrase") as search:
+            self.assertIsNone(note_runs._partitioned_candidate(
+                units, source.note_candidates, NoteRunConfig(), None, frozenset(),
+            ))
+        search.assert_not_called()
+
     def test_dense_phrase_evaluates_each_interval_once_per_lyric_position(self):
         size = 12
         source = document(
