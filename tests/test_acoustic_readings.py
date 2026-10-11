@@ -34,6 +34,34 @@ class ReadingChoiceTests(unittest.TestCase):
         result = select_acoustic_reading(("アス", "アシタ"), {"mix": "ソレトアシタデス"})
         self.assertEqual(result.kana, "アシタ")
 
+    def test_punctuated_kana_evidence_keeps_both_views_and_original_transcripts(self):
+        transcripts = {"mix": "「あした」、です。", "vocals": "ｱｼﾀ！\nデス…"}
+        result = select_acoustic_reading(("アス", "アシタ"), transcripts)
+        self.assertEqual(result.kana, "アシタ")
+        self.assertEqual(result.detail["reason"], "acoustic-agreement")
+        self.assertEqual(result.detail["transcripts"], transcripts)
+        self.assertEqual(result.detail["distances"][1], {"mix": 0., "vocals": 0.})
+        self.assertNotIn("invalid_transcripts", result.detail)
+
+    def test_punctuation_cannot_hide_a_conflicting_audio_view(self):
+        candidates = ("アオイ", "アカイ")
+        plain = select_acoustic_reading(candidates, {"mix": "アオイ", "vocals": "アカイ"})
+        punctuated = select_acoustic_reading(candidates,
+                                            {"mix": "アオイ。", "vocals": "アカイ"})
+        self.assertEqual(punctuated.kana, candidates[0])
+        self.assertEqual(punctuated.detail["distances"], plain.detail["distances"])
+        self.assertEqual(punctuated.detail["reason"], plain.detail["reason"])
+
+    def test_evidence_punctuation_does_not_relax_reading_validation(self):
+        for text in ("ア、★シタ", "ア、skyシタ", "ア、漢字シタ"):
+            with self.subTest(text=text):
+                result = select_acoustic_reading(("アス", "アシタ"), {"mix": text})
+                self.assertEqual(result.kana, "アス")
+                self.assertEqual(result.detail["transcripts"]["mix"], text)
+                self.assertIn("position 3", result.detail["invalid_transcripts"]["mix"])
+        with self.assertRaises(ValueError):
+            select_acoustic_reading(("ア、ス", "アシタ"), {"mix": "アシタ"})
+
     def test_conflicting_views_and_equal_distances_preserve_default(self):
         for transcripts in ({"mix": "アオイ", "vocals": "アカイ"}, {"mix": "アシイ"}):
             result = select_acoustic_reading(("アオイ", "アカイ"), transcripts)

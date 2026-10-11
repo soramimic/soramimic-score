@@ -81,7 +81,7 @@ def _node_reading(node, *, lyric_input=None):
         if node.surface:
             consumed.append(node.surface)
             fields = next(csv.reader([node.feature]))
-            if fields[0] != "補助記号":
+            if node.surface.strip() and fields[0] != "補助記号":
                 pronunciation = fields[9] if len(fields) > 9 else "*"
                 if pronunciation in {"", "*"}:
                     pronunciation = katakana(node.surface)
@@ -236,7 +236,14 @@ def dictionary_readings(_path, lines, *, automatic=False):
 
 
 def _comparison_kana(text, *, evidence=False):
-    """Apply Video's kana comparison normalization to a closed reading."""
+    """Normalize readings strictly, allowing punctuation only in ASR evidence."""
+    if evidence:
+        # KanaWhisper may punctuate its transcript. Keep the original transcript
+        # in selection evidence, and replace punctuation with spacing only in
+        # this comparison view. Letters, symbols and unknown text still fail
+        # complete-reading validation; dictionary/ruby candidates stay strict.
+        text = "".join(" " if unicodedata.category(char).startswith("P") else char
+                       for char in text)
     kana = normalize_reading(text).replace("ヲ", "オ") if text.strip() else ""
     small_vowels = {"ァ": "ア", "ィ": "イ", "ゥ": "ウ", "ェ": "エ",
                     "ォ": "オ", "ヮ": "ワ"}
