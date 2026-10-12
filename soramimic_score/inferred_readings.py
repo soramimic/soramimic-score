@@ -36,8 +36,17 @@ def inferred_reading_slots(text, selection):
         with _YOMI_LOCK:
             left = get_yomi(text[:start])
             right = get_yomi(text[end:])
-        left = normalize_reading(left) if left else ""
-        right = normalize_reading(right) if right else ""
+        try:
+            left = normalize_reading(left) if left else ""
+            right = normalize_reading(right) if right else ""
+        except ValueError as exc:
+            # These partial dictionary results only locate an optional edit.
+            # Invalid context cannot establish its bounds; keep the complete
+            # canonical reading instead of rewriting or truncating it.
+            output.append({**span, "mapped": False, "kana_start": None,
+                           "kana_end": None, "mapping_reason": "invalid-context-reading",
+                           "mapping_error": str(exc)})
+            continue
         mapped = (selection.kana.startswith(left) and selection.kana.endswith(right)
                   and len(left) + len(right) <= len(selection.kana))
         output.append({**span, "mapped": mapped,
@@ -74,6 +83,9 @@ def inferred_reading_proposals(reading, slots, transcripts):
                "views": {}, "reason": "unmapped"}
         evidence.append(row)
         if not slot["mapped"]:
+            if "mapping_reason" in slot:
+                row["reason"] = slot["mapping_reason"]
+                row["error"] = slot["mapping_error"]
             continue
         lo, hi = slot["kana_start"], slot["kana_end"]
         left, right = _moras(reading[:lo])[-6:], _moras(reading[hi:])[:6]
