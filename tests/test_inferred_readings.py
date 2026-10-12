@@ -58,6 +58,57 @@ class InferredReadingTests(unittest.TestCase):
         self.assertTrue(spans[0]["mapped"])
         self.assertEqual((spans[0]["kana_start"], spans[0]["kana_end"]), (3, 7))
 
+    def test_invalid_partial_context_abstains_without_changing_the_complete_reading(self):
+        for prefix, suffix in (("ウタウ?", "コエ"), ("ウタウ", "コエ!"),
+                               ("ウタウ A", "コエ")):
+            with self.subTest(prefix=prefix, suffix=suffix):
+                yomi = SimpleNamespace(get_yomi=lambda text: {
+                    "歌う ": prefix, " 声": suffix}[text])
+                original = selection("ウタウズクズクコエ")
+                with patch.dict("sys.modules", {"soramimic_yomi": yomi}):
+                    spans = inferred_reading_slots("歌う zzqzzq 声", original)
+                self.assertEqual(original.kana, "ウタウズクズクコエ")
+                self.assertFalse(spans[0]["mapped"])
+                self.assertIsNone(spans[0]["kana_start"])
+                self.assertIsNone(spans[0]["kana_end"])
+                proposals, evidence = inferred_reading_proposals(
+                    original.kana, spans, {"mix": original.kana})
+                self.assertFalse(proposals)
+                self.assertEqual(evidence[0]["reason"], "invalid-context-reading")
+                json.dumps(evidence, allow_nan=False)
+
+    def test_invalid_context_for_one_span_does_not_discard_another_valid_span(self):
+        original = selection("ズクズクコエズクズク")
+        detail = json.loads(json.dumps(original.detail))
+        template = detail["candidate_provenance"][0]["yomi_candidates"][0]["inferred_spans"][0]
+        detail["candidate_provenance"][0]["yomi_candidates"][0]["inferred_spans"] = [
+            {**template, "start": 0, "end": 6},
+            {**template, "start": 9, "end": 15},
+        ]
+        yomi = SimpleNamespace(get_yomi=lambda text: {
+            "": "", " 声 zzqzzq": "コエズクズク?", "zzqzzq 声 ": "ズクズクコエ",
+        }[text])
+        with patch.dict("sys.modules", {"soramimic_yomi": yomi}):
+            spans = inferred_reading_slots("zzqzzq 声 zzqzzq", replace(original, detail=detail))
+        self.assertFalse(spans[0]["mapped"])
+        self.assertTrue(spans[1]["mapped"])
+        self.assertEqual((spans[1]["kana_start"], spans[1]["kana_end"]), (6, 10))
+
+    def test_adapter_keeps_the_full_candidate_when_partial_context_is_invalid(self):
+        base = "ウタウズクズク"
+        yomi = SimpleNamespace(get_yomi=lambda text: {"歌う ": "ウタウ?", "": ""}[text])
+        with patch("soramimic_score.models.dictionary_readings", return_value=(selection(),)), \
+             patch("soramimic_score.models.symbol_slots", return_value=()), \
+             patch.dict("sys.modules", {"soramimic_yomi": yomi,
+                 "librosa": SimpleNamespace(get_duration=lambda **_: 10.)}), \
+             patch("soramimic_score.models.transcribe_kana_views",
+                   return_value={"mix": (base,), "vocals": (base,)}):
+            result, = create_adapters(self.model_config(), vocals_path=Path("vocals.wav")).reading_selector(
+                Path("mix.wav"), (LyricLine("歌う zzqzzq", 2., 5.),))
+        self.assertEqual(result.kana, base)
+        self.assertEqual(result.candidates, (base,))
+        self.assertEqual(result.detail["inferred_evidence"][0]["reason"], "invalid-context-reading")
+
     def test_audio_repeat_count_wins_a_substring_tie_over_a_guess(self):
         base, heard = "ウタウズクズク", "ウタウズクズクズク"
         views = {"mix": heard, "vocals": heard}
