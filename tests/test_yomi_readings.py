@@ -40,6 +40,22 @@ class YomiReadingsTests(unittest.TestCase):
             selection, = dictionary_readings(None, (LyricLine("やった"),), automatic=True)
         self.assertEqual(selection.kana, "ヤッタ")
 
+    def test_invalid_token_pronunciation_cannot_replace_a_valid_complete_reading(self):
+        for invalid in ("?", "A", "★"):
+            with self.subTest(invalid=invalid):
+                tokens = [{"surface_form": "歌う", "pronunciation": "ウタウ"},
+                          {"surface_form": "?", "pronunciation": invalid},
+                          {"surface_form": "声", "pronunciation": "コエ"}]
+                with patch.dict(sys.modules, {"soramimic_yomi": SimpleNamespace(
+                        get_tokens=lambda _: tokens)}):
+                    self.assertEqual(token_reading_proposals("歌う?声", "ウタウコエ"), ())
+
+    def test_invalid_token_context_does_not_hide_an_invalid_canonical_reading(self):
+        with patch.dict(sys.modules, {"soramimic_yomi": SimpleNamespace(
+                get_tokens=lambda _: [{"surface_form": "?", "pronunciation": "?"}])}):
+            with self.assertRaisesRegex(ValueError, "unsupported character"):
+                token_reading_proposals("?", "ウタウ?コエ")
+
     def test_dictionary_normalizes_candidates_before_acoustic_selection(self):
         self.yomi.return_value = [Candidate("ｶﾞ"), Candidate("ヰ"),
                                  Candidate("カ★ナ"), Candidate("ヌ\u3099")]
