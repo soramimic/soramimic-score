@@ -763,7 +763,8 @@ def optimize_note_runs(
 
     ``segment_ids_by_mora`` should be derived from the selected lyrics (for
     example bunsetsu-like groups), never from reference/XF note truth. Optional
-    line windows must be raw Whisper segment bounds keyed by utterance ID.
+    line windows must be recognized lyric intervals keyed by utterance ID,
+    optionally adjusted to nearby melody rests.
     """
     if not isinstance(document, IntermediateRepresentation):
         raise TypeError("document must be an IntermediateRepresentation")
@@ -810,7 +811,21 @@ def optimize_note_runs(
     if any(left[2] > right[2] or left[3] > right[3]
            for left, right in zip(anchors, anchors[1:])):
         raise ValueError("utterance CTC onsets must follow chronological order")
-    cuts = [(left[3] + right[2]) / 2 for left, right in zip(anchors, anchors[1:])]
+    cuts = []
+    for left, right in zip(anchors, anchors[1:]):
+        cut = (left[3] + right[2]) / 2
+        if line_windows_by_utterance is not None and right[0] == left[0] + 1:
+            line_end = line_windows_by_utterance[left[1]][1]
+            next_start = line_windows_by_utterance[right[1]][0]
+            line_cut = (line_end + next_start) / 2
+            # A final syllable's onset does not mark the end of its phrase.
+            # Keep its continuation notes up to the recognized line boundary,
+            # and reserve notes starting after that boundary for the next line.
+            # Conflicting CTC observations retain the acoustic midpoint; do not
+            # infer a boundary across intervening lines without timing either.
+            if left[3] < line_cut <= right[2]:
+                cut = line_cut
+        cuts.append(cut)
     note_groups = {utterance_id: [] for utterance_id, _units_for_phrase in phrases}
     if anchors:
         owner_index = 0
