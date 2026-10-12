@@ -300,6 +300,62 @@ class NoteRunOptimizationTests(unittest.TestCase):
         self.assertEqual(result.omitted_source_note_ids, ("detached",))
         self.assertFalse(result.omitted_mora_ids)
 
+    def test_line_boundary_keeps_phrase_tail_without_taking_next_phrase(self):
+        source = multiline_document(("カ", "キ"), (.05, 1.2), (
+            note("body", 0, .15), note("tail", .15, .3, 62),
+            note("next-head", .4, 1.2, 65), note("next-tail", 1.2, 1.5, 67),
+        ))
+        for end, start in ((.35, .35), (.3, .4), (.4, .4)):
+            with self.subTest(end=end, start=start):
+                result = optimize_note_runs(
+                    source, NoteRunConfig(whisper_boundary_cost_per_sec2=.1),
+                    line_windows_by_utterance={"u0": (0, end), "u1": (start, 1.5)},
+                )
+                self.assertEqual(
+                    [(assignment.kana, tuple(identifier for n in assignment.notes
+                                             for identifier in n.source_note_ids))
+                     for assignment in result.assignments],
+                    [("カ", ("body", "tail")), ("キ", ("next-head", "next-tail"))],
+                )
+                self.assertFalse(result.omitted_source_note_ids)
+                self.assertFalse(result.omitted_mora_ids)
+
+    def test_line_boundary_keeps_tail_after_ctc_midpoint_with_its_phrase(self):
+        source = multiline_document(("カ", "キ"), (.05, 1.0), (
+            note("body", 0, .5), note("tail", .55, .85, 62),
+            note("next", 1.0, 1.5, 65),
+        ))
+        result = optimize_note_runs(
+            source, NoteRunConfig(whisper_boundary_cost_per_sec2=.1),
+            line_windows_by_utterance={"u0": (0, .9), "u1": (.9, 1.5)},
+        )
+        self.assertEqual(
+            [tuple(identifier for n in assignment.notes for identifier in n.source_note_ids)
+             for assignment in result.assignments],
+            [("body", "tail"), ("next",)],
+        )
+        self.assertFalse(result.omitted_source_note_ids)
+        self.assertFalse(result.omitted_mora_ids)
+
+    def test_line_boundary_does_not_override_crossing_ctc_observations(self):
+        for onsets, boundary in (((.2, .8), 1.1), ((.6, 1.4), .4)):
+            with self.subTest(onsets=onsets, boundary=boundary):
+                source = multiline_document(("カ", "キ"), onsets, (
+                    note("first", onsets[0], onsets[0] + .3),
+                    note("second", onsets[1], onsets[1] + .3, 65),
+                ))
+                result = optimize_note_runs(
+                    source, NoteRunConfig(whisper_boundary_cost_per_sec2=.1),
+                    line_windows_by_utterance={"u0": (0, boundary),
+                                               "u1": (boundary, 2)},
+                )
+                self.assertEqual(
+                    [assignment.notes[0].source_note_ids for assignment in result.assignments],
+                    [("first",), ("second",)],
+                )
+                self.assertFalse(result.omitted_mora_ids)
+                self.assertFalse(result.omitted_source_note_ids)
+
     def test_ctc_posterior_floor_does_not_pull_lyrics_to_early_notes(self):
         source = multiline_document(("カキク",), (.05, .31, .34), (
             note("first", 0, .3), note("middle", .3, .6),

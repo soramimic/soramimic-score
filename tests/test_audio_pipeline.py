@@ -129,6 +129,28 @@ class AudioPipelineTests(unittest.TestCase):
                                   "歌詞の読みを確認しています", "モーラの時刻を推定しています",
                                   "楽譜データを組み立てています"])
 
+    def test_phrase_tail_and_next_phrase_survive_rest_snapped_line_boundary(self):
+        adapters = AudioAdapters(
+            lambda _path, lines: tuple(ReadingSelection(line.text, "test", .9)
+                                       for line in lines),
+            lambda _path, _lines, _readings: (
+                AlignedMora(0, 0, "カ", .05, .3, .9),
+                AlignedMora(1, 0, "キ", 1.2, 1.5, .9),
+            ),
+            lambda _path: (
+                MelodyNote(0, .15, 60), MelodyNote(.15, .3, 62),
+                MelodyNote(.4, 1.2, 65), MelodyNote(1.2, 1.5, 67),
+            ),
+            lambda _path: (LyricLine("カ", 0, .32), LyricLine("キ", .38, 1.5)),
+        )
+        score = analyze_audio(self.audio, adapters)
+        self.assertEqual(
+            [(slot.kana, slot.midi_pitch, slot.start_sec, slot.end_sec)
+             for slot in score.score.synthesis_plan],
+            [("カ", 60, 0, .15), ("ー", 62, .15, .3),
+             ("キ", 65, .4, 1.2), ("ー", 67, 1.2, 1.5)],
+        )
+
     def test_credit_like_whisper_line_is_excluded_before_alignment(self):
         self.assertTrue(is_credit_hallucination("作詞・作曲・編曲 初音ミク"))
         self.assertTrue(is_credit_hallucination("字幕制作: Example"))
