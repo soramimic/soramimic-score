@@ -294,7 +294,14 @@ def token_reading_proposals(surface_text, default_reading, evidence=None):
                   for token in get_tokens(surface_text)]
     pieces = [reading for surface, reading in tokens if surface]
     tokens = [(surface, reading) for surface, reading in tokens if surface]
-    if _comparison_kana("".join(pieces)) != _comparison_kana(default_reading):
+    default_key = _comparison_kana(default_reading)
+    try:
+        token_key = _comparison_kana("".join(pieces))
+    except ValueError:
+        # Token-level pronunciations are optional proposal context, not the
+        # complete canonical reading. An invalid context cannot justify an edit.
+        return ()
+    if token_key != default_key:
         return ()
     default_vowels = _vowels(default_reading)
     keys = None
@@ -309,7 +316,7 @@ def token_reading_proposals(surface_text, default_reading, evidence=None):
                 # selection records each rejected transcript and its error.
                 continue
     proposals = []
-    seen = {_comparison_kana(default_reading)}
+    seen = {default_key}
     for index, (surface, reading) in enumerate(tokens):
         if not re.search(r"[\u3400-\u9fff々〆ヵヶ]", surface) or not reading:
             continue

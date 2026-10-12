@@ -109,6 +109,19 @@ class InferredReadingTests(unittest.TestCase):
         self.assertEqual(result.candidates, (base,))
         self.assertEqual(result.detail["inferred_evidence"][0]["reason"], "invalid-context-reading")
 
+    def test_automatic_adapter_keeps_the_full_candidate_when_token_context_is_invalid(self):
+        base = ReadingSelection("ウタウコエ", "dictionary", 1., ("ウタウコエ",))
+        tokens = [{"surface_form": "歌う", "pronunciation": "ウタウ"},
+                  {"surface_form": "?", "pronunciation": "?"},
+                  {"surface_form": "声", "pronunciation": "コエ"}]
+        with patch("soramimic_score.models.dictionary_readings", return_value=(base,)), \
+             patch("soramimic_score.models.symbol_slots", return_value=()), \
+             patch.dict("sys.modules", {"soramimic_yomi": SimpleNamespace(
+                 get_tokens=lambda _: tokens)}):
+            result, = create_adapters(self.model_config()).automatic_reading_selector(
+                Path("mix.wav"), (LyricLine("歌う?声", 2., 5.),))
+        self.assertEqual(result, base)
+
     def test_audio_repeat_count_wins_a_substring_tie_over_a_guess(self):
         base, heard = "ウタウズクズク", "ウタウズクズクズク"
         views = {"mix": heard, "vocals": heard}
