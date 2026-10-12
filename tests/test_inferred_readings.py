@@ -79,6 +79,35 @@ class InferredReadingTests(unittest.TestCase):
         self.assertEqual(selected.kana, base)
         self.assertEqual(selected.detail["reason"], "no-acoustic-evidence")
 
+    def test_invalid_auxiliary_view_abstains_without_losing_the_original_reading(self):
+        base, heard = "ウタウズクズク", "ウタウズクズクズク"
+        for invalid in ("ウタウ、ズクズク", "not kana", "ウタウ!ズクズク"):
+            for views in ({"mix": heard, "vocals": invalid},
+                          {"mix": invalid, "vocals": heard},
+                          {"mix": invalid, "vocals": invalid}):
+                with self.subTest(views=views):
+                    proposals, evidence = inferred_reading_proposals(base, (slot(),), views)
+                    self.assertEqual(proposals, ())
+                    self.assertEqual(evidence[0]["reason"], "ambiguous-or-missing-audio")
+                    for view, text in views.items():
+                        if text == invalid:
+                            self.assertEqual(evidence[0]["views"][view]["reason"], "invalid-reading")
+                            self.assertEqual(evidence[0]["views"][view]["readings"], [])
+                    json.dumps(evidence, allow_nan=False)
+
+    def test_invalid_auxiliary_views_keep_a_complete_dictionary_candidate_in_the_adapter(self):
+        base, heard = "ウタウズクズク", "ウタウズク、ズク"
+        with patch("soramimic_score.models.dictionary_readings", return_value=(selection(),)), \
+             patch("soramimic_score.models.inferred_reading_slots", return_value=(slot(),)), \
+             patch("soramimic_score.models.symbol_slots", return_value=()), \
+             patch.dict("sys.modules", {"librosa": SimpleNamespace(get_duration=lambda **_: 10.)}), \
+             patch("soramimic_score.models.transcribe_kana_views",
+                   return_value={"mix": (heard,), "vocals": (heard,)}):
+            result, = create_adapters(self.model_config(), vocals_path=Path("vocals.wav")).reading_selector(
+                Path("mix.wav"), (LyricLine("歌う zzqzzq", 2., 5.),))
+        self.assertEqual(result.kana, base)
+        self.assertEqual(result.candidates, (base,))
+
     def test_conflicting_or_missing_audio_cannot_propose_a_replacement(self):
         for views in ({"mix": "ウタウズクズクズク", "vocals": "ウタウズクズク"},
                       {"mix": "ウタウズクズクズク", "vocals": ""}, {}):

@@ -82,7 +82,13 @@ def inferred_reading_proposals(reading, slots, transcripts):
             continue
         choices_by_view = []
         for view, text in transcripts.items():
-            heard = _moras(text)
+            try:
+                heard = _moras(text)
+            except ValueError as exc:
+                row["views"][view] = {"anchor_cost": None, "readings": [],
+                                      "reason": "invalid-reading", "error": str(exc)}
+                choices_by_view.append([])
+                continue
             matches = []
             if 0 < len(heard) <= 512:
                 for start, a in _anchor_edges(left, heard, left=True):
