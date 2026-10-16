@@ -88,3 +88,8 @@ work/
 *.local.*
 *.orig
 *.tmp
+
+# Claude Code local preferences and isolated sessions
+CLAUDE.local.md
+.claude/settings.local.json
+.claude/worktrees/
