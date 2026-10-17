@@ -236,3 +236,98 @@ def prepare_supplied_audio(path, supplied, recognized, notes, adapters, *, adjus
                                              for i in retained[index]["supplied_indices"]],
                 recording_duration_sec=duration)
     return tuple(lines), plan, tuple(unobserved)
+
+
+def select_authored_readings(lines, select):
+    """Select each authored line, retaining a joint target for acoustic alignment.
+
+    Recognition can locate several input lines in one interval. Keeping each
+    selected reading explicitly avoids guessing a text-to-mora cut afterwards.
+    """
+    from dataclasses import replace
+    from .audio import ReadingSelection, _validate_readings
+
+    expanded = []
+    owners = []
+    for index, line in enumerate(lines):
+        for text in line.text.split("\n"):
+            expanded.append(replace(line, text=text))
+            owners.append(index)
+    selected = _validate_readings(expanded, select(tuple(expanded), tuple(owners)))
+    output = []
+    for index, line in enumerate(lines):
+        parts = [reading for owner, reading in zip(owners, selected, strict=True)
+                 if owner == index]
+        if len(parts) == 1:
+            output.append(parts[0])
+            continue
+        kana = "".join(part.kana for part in parts)
+        detail = {"authored_line_readings": [asdict(part) for part in parts]}
+        if any("parenthetical_readings" in part.detail for part in parts):
+            detail.update(
+                resolved_text="\n".join(part.detail.get("resolved_text", text)
+                                        for part, text in zip(parts, line.text.split("\n"), strict=True)),
+                parenthetical_readings=[item for part in parts
+                                        for item in part.detail.get("parenthetical_readings", ())],
+            )
+        output.append(ReadingSelection(kana, "supplied-lines", min(p.confidence for p in parts),
+                                        (kana,), detail))
+    return tuple(output)
+
+
+def restore_authored_lines(lines, readings, moras, overlay, unobserved):
+    """Restore input boundaries using exact selected mora counts and CTC times."""
+    from dataclasses import replace
+    from .audio import ReadingSelection
+    from .japanese import kana_to_moras
+
+    if not any("authored_line_readings" in reading.detail for reading in readings):
+        return lines, readings, moras, unobserved
+    restored_lines, restored_readings, restored_moras, restored_groups = [], [], [], []
+    restored_unobserved = []
+    for index, (line, reading, group) in enumerate(zip(lines, readings, overlay["groups"], strict=True)):
+        parts = reading.detail.get("authored_line_readings")
+        parts = tuple(ReadingSelection(**part) for part in parts) if parts else (reading,)
+        texts = line.text.split("\n") if len(parts) > 1 else (line.text,)
+        offset = 0
+        for part_index, (text, part) in enumerate(zip(texts, parts, strict=True)):
+            target = len(restored_lines)
+            count = len(kana_to_moras(part.kana))
+            aligned = [replace(mora, line_index=target, mora_index=mora.mora_index - offset)
+                       for mora in moras if mora.line_index == index
+                       and offset <= mora.mora_index < offset + count]
+            offset += count
+            start, end = line.start_sec, line.end_sec
+            if len(parts) > 1:
+                start = min((m.start_sec for m in aligned), default=None)
+                end = max((m.end_sec for m in aligned), default=None)
+            restored_lines.append(replace(line, text=text, start_sec=start, end_sec=end))
+            restored_readings.append(part)
+            restored_moras.extend(aligned)
+            if index in unobserved:
+                restored_unobserved.append(target)
+            supplied_indices = group["supplied_indices"]
+            if len(parts) > 1 and len(supplied_indices) != len(parts):
+                raise ValueError("authored lines do not match supplied lyric provenance")
+            restored_group = group | {
+                "display_text": text, "acoustic_reading": part.kana,
+                "reading_candidates": list(part.candidates),
+                "supplied_indices": [supplied_indices[part_index]] if len(parts) > 1 else supplied_indices,
+                "line_indices": [target], "utterance_ids": [f"u{target}"],
+                "start_sec": start if start is not None else group["start_sec"],
+                "end_sec": end if end is not None else group["end_sec"],
+                "acoustic_group_index": index, "shared_acoustic_window": len(parts) > 1,
+            }
+            if len(parts) > 1:
+                restored_group.pop("parenthetical_readings", None)
+                restored_group.pop("supplied_display_text", None)
+                if "parenthetical_readings" in part.detail:
+                    restored_group.update(
+                        parenthetical_readings=part.detail["parenthetical_readings"],
+                        supplied_display_text=group["supplied_display_text"].split("\n")[part_index],
+                    )
+            restored_groups.append(restored_group)
+    overlay["acoustic_groups"] = overlay["groups"]
+    overlay["groups"] = restored_groups
+    return (tuple(restored_lines), tuple(restored_readings), tuple(restored_moras),
+            tuple(restored_unobserved))

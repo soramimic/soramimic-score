@@ -859,7 +859,8 @@ def analyze_audio(
     unobserved_lines = ()
     lines = recognized
     if lyrics is not None:
-        from .supplied_lyrics import prepare_supplied_audio
+        from .supplied_lyrics import (prepare_supplied_audio, restore_authored_lines,
+                                     select_authored_readings)
         lines, overlay, unobserved_lines = prepare_supplied_audio(
             path, lyrics, recognized, notes, adapters, adjust_lyrics=adjust_lyrics,
             recognition_evidence=raw_recognized if adapters.lyric_recognizer is not None else None,
@@ -875,8 +876,12 @@ def analyze_audio(
         contexts = tuple(overlay["groups"][i]["original_text"]
                          if overlay["groups"][i]["operation"] == "match" else None
                          for i in active_indices)
-        active_readings = _validate_readings(active_lines, _run_adapter(
-            "readings", adapters.supplied_reading_selector, path, active_lines, contexts))
+        active_readings = select_authored_readings(active_lines, lambda expanded, owners:
+            _run_adapter("readings", adapters.supplied_reading_selector, path, expanded,
+                         tuple(contexts[i] for i in owners)))
+    elif overlay is not None:
+        active_readings = select_authored_readings(active_lines, lambda expanded, _owners:
+            _run_adapter("readings", reading_selector, path, expanded)) if active_lines else ()
     else:
         active_readings = _validate_readings(active_lines, _run_adapter(
             "readings", reading_selector, path, active_lines,
@@ -884,10 +889,9 @@ def analyze_audio(
     selected = dict(zip(active_indices, active_readings, strict=True))
     if unobserved_lines:
         silent_lines = tuple(lines[i] for i in unobserved_lines)
-        defaults = _validate_readings(silent_lines, _run_adapter(
-            "readings", adapters.dictionary_reading_selector or reading_selector,
-            path, silent_lines,
-        ))
+        defaults = select_authored_readings(silent_lines, lambda expanded, _owners:
+            _run_adapter("readings", adapters.dictionary_reading_selector or reading_selector,
+                         path, expanded))
         selected.update(zip(unobserved_lines, defaults, strict=True))
     readings = tuple(selected[i] for i in range(len(lines)))
     # A resolved reading annotation is not a second sung occurrence. Preserve
@@ -1332,6 +1336,9 @@ def analyze_audio(
             lines = _validate_lines(lines, timed=True)
             readings = _validate_readings(lines, readings)
             moras = _validate_moras(readings, moras)
+    if overlay is not None:
+        lines, readings, moras, unobserved_lines = restore_authored_lines(
+            lines, readings, moras, overlay, unobserved_lines)
     if on_progress:
         on_progress("楽譜データを組み立てています")
     observations = build_audio_observations(lines, readings, moras, notes,
@@ -1370,7 +1377,11 @@ def analyze_audio(
          if line.start_sec is not None and line.end_sec is not None} or None
     )
     if overlay is not None:
-        line_windows = {f"u{i}": (g["start_sec"], g["end_sec"])
+        # No acoustic boundary was measured for these unsung lines. A shared
+        # empty anchor keeps them unresolved without inventing fractional times.
+        line_windows = {f"u{i}": (g["start_sec"], g["start_sec"]
+                                    if i in unobserved_lines and g.get("shared_acoustic_window")
+                                    else g["end_sec"])
                         for i, g in enumerate(overlay["groups"])}
     if line_windows and len(line_windows) == len(lines) and not unobserved_lines:
         snapped = snap_line_windows_to_rests(

@@ -22,7 +22,8 @@ class LyricInputContractTests(unittest.TestCase):
         original = "\r\n カ \t\r\n\r\n|声《こえ》\n"
         supplied = parse_lyric_input(original)
         adapters = AudioAdapters(
-            lambda _p, _lines: (ReadingSelection("カコエ", "synthetic", 1.),),
+            lambda _p, _lines: (ReadingSelection("カ", "synthetic", 1.),
+                                ReadingSelection("コエ", "synthetic", 1.)),
             lambda _p, _lines, _readings: tuple(
                 AlignedMora(0, i, kana, i * .3, (i + 1) * .3, .9)
                 for i, kana in enumerate("カコエ")),

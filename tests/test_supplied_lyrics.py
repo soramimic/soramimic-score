@@ -265,6 +265,77 @@ class SuppliedLyricsTests(unittest.TestCase):
         self.assertEqual(lyric_surface(restored)["supplied_lines"], ["カキ", "サシ"])
         self.assertEqual(lyric_surface(restored)["removed_supplied_indices"], [0, 1])
 
+    def test_coarse_recognition_keeps_short_and_repeated_input_lines_separate(self):
+        supplied = ["カキクケコ", "サシスセソ", "カキクケコ"]
+        for adjust in (False, True):
+            with self.subTest(adjust=adjust):
+                self.aligned_text.clear()
+                result = analyze_audio(self.path, self.adapters(
+                    (LyricLine("".join(supplied), 0, 6),),
+                    tuple(MelodyNote(i * .4, (i + 1) * .4, 60 + i % 5)
+                          for i in range(15))), lyrics=supplied, adjust_lyrics=adjust)
+                # Align jointly, but never expose the acoustic grouping as a phrase.
+                self.assertEqual(self.aligned_text, ["\n".join(supplied)])
+                self.assertEqual([line.text for line in result.score.canonical], supplied)
+                self.assertEqual([line.kana for line in result.score.canonical], supplied)
+                self.assertEqual([u.surface for u in result.observations.utterances], supplied)
+                overlay = lyric_surface(result)
+                self.assertEqual([g["supplied_indices"] for g in overlay["groups"]], [[0], [1], [2]])
+                self.assertEqual([g["utterance_ids"] for g in overlay["groups"]],
+                                 [["u0"], ["u1"], ["u2"]])
+                self.assertEqual([(g["start_sec"], g["end_sec"]) for g in overlay["groups"]],
+                                 [(0, 2), (2, 4), (4, 6)])
+                self.assertEqual(len(overlay["acoustic_groups"]), 1)
+                self.assertEqual("".join(slot.kana for slot in result.score.synthesis_plan),
+                                 "".join(supplied))
+                restored = type(result).from_json(result.to_json())
+                self.assertEqual(restored, result)
+
+    def test_authored_boundaries_use_measured_moras_instead_of_proportional_times(self):
+        timings = ((.1, .2), (.2, .3), (2., 2.4), (2.4, 2.6))
+        def align(_path, lines, readings):
+            self.assertEqual(len(lines), 1)
+            return tuple(AlignedMora(0, i, kana, *timing, .9)
+                         for i, (kana, timing) in enumerate(zip("カキサシ", timings, strict=True)))
+        adapters = replace(self.adapters((LyricLine("カキサシ", 0, 6),),
+            tuple(MelodyNote(start, end, 60) for start, end in timings)), mora_aligner=align)
+        result = analyze_audio(self.path, adapters, lyrics=["カキ", "サシ"])
+        self.assertEqual([(g["start_sec"], g["end_sec"]) for g in lyric_surface(result)["groups"]],
+                         [(.1, .3), (2., 2.6)])
+
+    def test_unobserved_group_retains_every_authored_line(self):
+        silent = lambda _path, windows: tuple(
+            VocalActivity(-100, -90, 0, False, silence_confirmed=True) for _ in windows)
+        result = analyze_audio(self.path, self.adapters((), vocal=silent),
+                               lyrics=["カキ", "サシ", "タチ"])
+        self.assertEqual([line.text for line in result.score.canonical], ["カキ", "サシ", "タチ"])
+        self.assertEqual(self.aligned_text, [])
+        self.assertEqual(len(result.score.unresolved_unit_ids), 6)
+        self.assertEqual([g["alignment_status"] for g in lyric_surface(result)["groups"]],
+                         ["no-performance-evidence"] * 3)
+
+    def test_line_readings_and_annotations_survive_joint_alignment(self):
+        supplied = ["朝の音", "Hello moon", "空（そら）"]
+        observed = []
+        def select(_path, lines, contexts):
+            observed.extend((line.text, context) for line, context in zip(lines, contexts, strict=True))
+            return (ReadingSelection("アサノオト", "test", .9, ("アサノオト", "アサノネ")),
+                    ReadingSelection("ハロームーン", "test", .8),
+                    ReadingSelection("ソラ", "test", .9, ("ソラ",), {
+                        "resolved_text": "空", "parenthetical_readings": [{"decision": "ruby"}],
+                    }))
+        adapters = replace(self.adapters(
+            (LyricLine("".join(supplied), 0, 6),), (MelodyNote(0, 6, 60),)),
+            supplied_reading_selector=select)
+        result = analyze_audio(self.path, adapters, lyrics=supplied)
+        self.assertEqual([line.text for line in result.score.canonical], ["朝の音", "Hello moon", "空"])
+        self.assertEqual([line.kana for line in result.score.canonical], ["アサノオト", "ハロームーン", "ソラ"])
+        self.assertEqual([text for text, _ in observed], supplied)
+        self.assertTrue(all(context == "".join(supplied) for _, context in observed))
+        evidence = [e.detail for e in result.score.evidence if e.kind == "reading-selection"]
+        self.assertEqual(evidence[0]["candidates"], ["アサノオト", "アサノネ"])
+        self.assertEqual(evidence[1]["parenthetical_readings"], [{"decision": "ruby"}])
+
 
 if __name__ == "__main__":
     unittest.main()
