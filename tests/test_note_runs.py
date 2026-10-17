@@ -337,6 +337,85 @@ class NoteRunOptimizationTests(unittest.TestCase):
         self.assertFalse(result.omitted_source_note_ids)
         self.assertFalse(result.omitted_mora_ids)
 
+    def test_melody_rest_keeps_tail_after_an_early_recognized_boundary(self):
+        source = multiline_document(("カ", "キ"), (.05, 1.2), (
+            note("body", 0, .5), note("tail", .5, .8, 62),
+            note("next", 1.0, 1.5, 65),
+        ))
+        result = optimize_note_runs(
+            source, preserving_config(),
+            line_windows_by_utterance={"u0": (0, .4), "u1": (.4, 1.5)},
+        )
+        self.assertEqual(
+            [tuple(identifier for n in a.notes for identifier in n.source_note_ids)
+             for a in result.assignments],
+            [("body", "tail"), ("next",)],
+        )
+        self.assertFalse(result.omitted_mora_ids)
+        self.assertFalse(result.omitted_source_note_ids)
+
+    def test_melody_rest_reserves_head_before_a_late_recognized_boundary(self):
+        source = multiline_document(("カ", "キ"), (.05, 1.2), (
+            note("body", 0, .5), note("tail", .5, .8, 62),
+            note("next", 1.0, 1.5, 65),
+        ))
+        result = optimize_note_runs(
+            source, preserving_config(),
+            line_windows_by_utterance={"u0": (0, 1.1), "u1": (1.1, 1.5)},
+        )
+        self.assertEqual(
+            [tuple(identifier for n in a.notes for identifier in n.source_note_ids)
+             for a in result.assignments],
+            [("body", "tail"), ("next",)],
+        )
+        self.assertFalse(result.omitted_mora_ids)
+        self.assertFalse(result.omitted_source_note_ids)
+
+    def test_rest_containing_boundary_wins_over_a_closer_midpoint(self):
+        source = multiline_document(("カ", "キ"), (.05, 1.6), (
+            note("body", 0, .3), note("head", 1.3, 1.4, 62),
+            note("next", 1.5, 1.9, 65),
+        ))
+        result = optimize_note_runs(
+            source, preserving_config(),
+            line_windows_by_utterance={"u0": (0, 1.2), "u1": (1.2, 1.9)},
+        )
+        self.assertEqual(
+            [tuple(identifier for n in a.notes for identifier in n.source_note_ids)
+             for a in result.assignments],
+            [("body",), ("head", "next")],
+        )
+
+    def test_equidistant_rests_prefer_the_longer_gap(self):
+        source = multiline_document(("カ", "キ"), (.05, 1.75), (
+            note("body", 0, .5), note("tail", .75, 1.0, 62),
+            note("next", 1.5, 2.0, 65),
+        ))
+        result = optimize_note_runs(
+            source, preserving_config(),
+            line_windows_by_utterance={"u0": (0, .875), "u1": (.875, 2.0)},
+        )
+        self.assertEqual(
+            [tuple(identifier for n in a.notes for identifier in n.source_note_ids)
+             for a in result.assignments],
+            [("body", "tail"), ("next",)],
+        )
+
+    def test_short_gap_keeps_recognized_boundary_as_fallback(self):
+        source = multiline_document(("カ", "キ"), (.05, 1.2), (
+            note("body", 0, .7), note("tail", .7, 1.0, 62),
+            note("next", 1.04, 1.5, 65),
+        ))
+        result = optimize_note_runs(
+            source, preserving_config(),
+            line_windows_by_utterance={"u0": (0, .6), "u1": (.6, 1.5)},
+        )
+        self.assertEqual(
+            [tuple(identifier for n in a.notes for identifier in n.source_note_ids)
+             for a in result.assignments],
+            [("body",), ("tail", "next")],
+        )
+
     def test_line_boundary_does_not_override_crossing_ctc_observations(self):
         for onsets, boundary in (((.2, .8), 1.1), ((.6, 1.4), .4)):
             with self.subTest(onsets=onsets, boundary=boundary):

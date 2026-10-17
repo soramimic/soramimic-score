@@ -824,7 +824,14 @@ def optimize_note_runs(
             # Conflicting CTC observations retain the acoustic midpoint; do not
             # infer a boundary across intervening lines without timing either.
             if left[3] < line_cut <= right[2]:
-                cut = line_cut
+                eligible_rests = [
+                    (max(a.end_sec - line_cut, 0.0, line_cut - b.start_sec),
+                     -(b.start_sec - a.end_sec), (a.end_sec + b.start_sec) / 2)
+                    for a, b in zip(document.note_candidates, document.note_candidates[1:])
+                    if b.start_sec - a.end_sec >= .08
+                    and left[3] < (a.end_sec + b.start_sec) / 2 <= right[2]
+                ]
+                cut = min(eligible_rests)[2] if eligible_rests else line_cut
         cuts.append(cut)
     note_groups = {utterance_id: [] for utterance_id, _units_for_phrase in phrases}
     if anchors:
