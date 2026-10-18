@@ -105,6 +105,112 @@ class SuppliedLyricsTests(unittest.TestCase):
         self.assertEqual([g["display_text"] for g in groups], ["カキ", "サシ\nタチ"])
         self.assertEqual([(g["start_sec"], g["end_sec"]) for g in groups], [(0, 2), (2, 4)])
 
+    def test_ctc_expands_both_sides_after_unchanged_reading_selection(self):
+        calls = []
+        supplied = ["カキ", "空（そら）", "タチ"]
+        def select(_path, lines, contexts):
+            calls.append(("read", [(l.text, l.start_sec, l.end_sec) for l in lines], contexts))
+            return (ReadingSelection("カキ", "test", .9),
+                    ReadingSelection("ソラ", "test", .8, ("ソラ",), {
+                        "resolved_text": "空", "parenthetical_readings": [{"decision": "ruby"}],
+                    }), ReadingSelection("タチ", "test", .9))
+        def align(_path, lines, readings):
+            calls.append(("align", [(l.text, l.start_sec, l.end_sec) for l in lines],
+                          [r.kana for r in readings]))
+            times = ((0, .5), (.5, 1), (1, 1.5), (1.5, 2), (2, 3), (3, 4))
+            return tuple(AlignedMora(0, i, kana, start, end, .9)
+                         for i, (kana, (start, end)) in enumerate(zip("カキソラタチ", times)))
+        adapters = replace(self.adapters((LyricLine("カキ", 0, 2), LyricLine("タチ", 2, 4)),
+                                         (MelodyNote(0, 4, 60),), duration=4),
+                           supplied_reading_selector=select, mora_aligner=align)
+        result = analyze_audio(self.path, adapters, lyrics=supplied)
+        self.assertEqual(calls, [
+            ("read", [("カキ", 0, 2), ("空（そら）", 2, 4), ("タチ", 2, 4)], ("カキ", None, None)),
+            ("align", [("カキ\n空\nタチ", 0, 4)], ["カキソラタチ"]),
+        ])
+        self.assertEqual([l.text for l in result.score.canonical], ["カキ", "空", "タチ"])
+        self.assertEqual([r.kana for r in result.observations.readings], ["カキ", "ソラ", "タチ"])
+        overlay = lyric_surface(result)
+        self.assertEqual([(g["start_sec"], g["end_sec"]) for g in overlay["groups"]],
+                         [(0, 1), (1, 2), (2, 4)])
+        self.assertEqual([g["supplied_indices"] for g in overlay["groups"]], [[0], [1], [2]])
+        self.assertEqual(overlay["groups"][1]["supplied_display_text"], "空（そら）")
+        self.assertEqual(overlay["groups"][1]["parenthetical_readings"], [{"decision": "ruby"}])
+        self.assertNotIn("parenthetical_readings", overlay["groups"][0])
+        self.assertEqual([(g["start_sec"], g["end_sec"]) for g in overlay["reading_stage_groups"]],
+                         [(0, 2), (2, 4)])
+        self.assertNotIn("vocal_activity_measurement", overlay["acoustic_groups"][0])
+        self.assertEqual(lyric_surface(type(result).from_json(result.to_json())), overlay)
+
+    def test_expansion_preserves_silent_lines_and_opt_in_removal(self):
+        silent = lambda _path, windows: tuple(
+            VocalActivity(-100, -90, 0, False, silence_confirmed=True) for _ in windows)
+        for adjust in (False, True):
+            with self.subTest(adjust=adjust):
+                self.aligned_text.clear()
+                result = analyze_audio(self.path, self.adapters(
+                    (LyricLine("カキ", 0, 2), LyricLine("タチ", 2, 4)),
+                    (MelodyNote(0, 4, 60),), vocal=silent),
+                    lyrics=["カキ", "サシ", "タチ", "ナニ"], adjust_lyrics=adjust)
+                self.assertEqual(self.aligned_text, ["カキ\nサシ\nタチ"])
+                overlay = lyric_surface(result)
+                self.assertEqual([g["supplied_indices"] for g in overlay["groups"]],
+                                 [[0], [1], [2]] + ([] if adjust else [[3]]))
+                self.assertEqual(overlay["removed_supplied_indices"], [3] if adjust else [])
+                if not adjust:
+                    self.assertEqual(overlay["groups"][-1]["alignment_status"], "no-performance-evidence")
+                    self.assertEqual(overlay["groups"][-1]["support"], {
+                        "melody": False, "recognition": False, "vocal_activity": False})
+
+    def test_expansion_keeps_automatic_addition_provenance(self):
+        heard = (LyricLine("カキ", 0, 1), LyricLine("サシ", 1, 2),
+                 LyricLine("タチ", 2, 3), LyricLine("ハヒ", 3, 4))
+        result = analyze_audio(self.path, self.adapters(heard, (MelodyNote(0, 4, 60),), duration=4),
+                               lyrics=["カキ", "タチ", "ナニ", "ハヒ"], adjust_lyrics=True)
+        self.assertEqual(self.aligned_text, ["カキ", "サシ", "タチ\nナニ\nハヒ"])
+        overlay = lyric_surface(result)
+        self.assertEqual([g["supplied_indices"] for g in overlay["groups"]], [[0], [], [1], [2], [3]])
+        self.assertEqual(overlay["groups"][1]["operation"], "add")
+        self.assertEqual(overlay["groups"][1]["reading_source"], "automatic-addition")
+        self.assertEqual([l.text for l in result.score.canonical], ["カキ", "サシ", "タチ", "ナニ", "ハヒ"])
+
+    def test_ctc_context_does_not_bridge_an_unobserved_group(self):
+        from soramimic_score.supplied_lyrics import expand_alignment_windows
+        lines = (LyricLine("カキ", 0, 2), LyricLine("サシ", None, None), LyricLine("タチ", 4, 6))
+        groups = [{"location_group_indices": [i]} for i in range(3)]
+        overlay = {"groups": groups, "ctc_context_edges": [[0, 1], [1, 2]]}
+        readings = self.readings(self.path, lines)
+        self.assertEqual(expand_alignment_windows(lines, readings, overlay, (1,)),
+                         (lines, readings, (1,)))
+        self.assertNotIn("reading_stage_groups", overlay)
+
+    def test_repeated_missing_anchors_have_bounded_ctc_context(self):
+        from soramimic_score.supplied_lyrics import expand_alignment_windows, select_authored_readings
+        recognized = tuple(LyricLine(f"カ{i}キ", i * 2, (i + 1) * 2) for i in range(64))
+        supplied = [text for i, line in enumerate(recognized)
+                    for text in ([line.text, "サシ"] if i < 63 else [line.text])]
+        lines, overlay, unobserved = prepare_supplied_audio(
+            self.path, supplied, recognized, (MelodyNote(0, 128, 60),),
+            self.adapters(recognized, duration=128), adjust_lyrics=False, recognition_evidence=recognized)
+        readings = select_authored_readings(lines, lambda expanded, _: tuple(
+            ReadingSelection("カキ", "test", 1) for _ in expanded))
+        expanded, _, _ = expand_alignment_windows(lines, readings, overlay, unobserved)
+        self.assertGreater(len(expanded), 1)
+        self.assertTrue(all(line.end_sec - line.start_sec <= 60 for line in expanded))
+        self.assertEqual("\n".join(l.text for l in expanded), "\n".join(supplied))
+
+    def test_touching_recording_edges_keep_ordered_ctc_targets(self):
+        for supplied, heard, expected in [
+            (["サシ", "カキ"], (LyricLine("カキ", 0, 4),), ["サシ\nカキ"]),
+            (["カキ", "サシ"], (LyricLine("カキ", 0, 4),), ["カキ\nサシ"]),
+        ]:
+            with self.subTest(supplied=supplied):
+                self.aligned_text.clear()
+                result = analyze_audio(self.path, self.adapters(heard, (MelodyNote(0, 4, 60),), duration=4),
+                                       lyrics=supplied)
+                self.assertEqual(self.aligned_text, expected)
+                self.assertEqual([g["supplied_indices"] for g in lyric_surface(result)["groups"]], [[0], [1]])
+
     def test_empty_recognition_still_aligns_supplied_lyrics_to_notes(self):
         result = analyze_audio(self.path, self.adapters(
             (), (MelodyNote(0, 6, 60),)), lyrics=["カキ", "サシ"])
