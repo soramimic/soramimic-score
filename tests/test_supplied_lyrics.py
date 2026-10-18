@@ -409,6 +409,22 @@ class SuppliedLyricsTests(unittest.TestCase):
         self.assertEqual([(g["start_sec"], g["end_sec"]) for g in lyric_surface(result)["groups"]],
                          [(.1, .3), (2., 2.6)])
 
+    def test_authored_newline_does_not_discard_a_shared_note_syllable(self):
+        def align(_path, lines, readings):
+            self.assertEqual(len(lines), 1)
+            return tuple(AlignedMora(0, i, kana, start, start + .02, .9)
+                         for i, (kana, start) in enumerate(zip("カキク", (.1, .4, .7))))
+        adapters = replace(self.adapters((LyricLine("カキク", 0, 1),),
+                                        (MelodyNote(0, 1, 60),)), mora_aligner=align)
+        result = analyze_audio(self.path, adapters, lyrics=["カ", "キク"])
+        self.assertEqual([line.text for line in result.score.canonical], ["カ", "キク"])
+        slots = result.score.synthesis_plan
+        self.assertEqual([(s.utterance_id, s.kana) for s in slots],
+                         [("u0", "カ"), ("u1", "キ"), ("u1", "ク")])
+        self.assertFalse(result.score.unresolved_unit_ids)
+        self.assertTrue(all(a.end_sec <= b.start_sec for a, b in zip(slots, slots[1:])))
+        self.assertEqual(type(result).from_json(result.to_json()), result)
+
     def test_unobserved_group_retains_every_authored_line(self):
         silent = lambda _path, windows: tuple(
             VocalActivity(-100, -90, 0, False, silence_confirmed=True) for _ in windows)

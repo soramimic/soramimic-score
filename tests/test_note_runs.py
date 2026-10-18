@@ -91,6 +91,50 @@ def preserving_config(**changes):
 
 
 class NoteRunOptimizationTests(unittest.TestCase):
+    def test_shared_acoustic_window_can_split_one_note_across_authored_lines(self):
+        source = multiline_document(("カ", "キク"), (.1, .4, .7), (
+            note("shared", 0, 1),
+        ))
+        result = optimize_note_runs(
+            source, preserving_config(),
+            line_windows_by_utterance={"u0": (0, .4), "u1": (.4, 1)},
+            utterance_groups=(("u0", "u1"),),
+        )
+        self.assertEqual([a.kana for a in result.assignments], ["カ", "キ", "ク"])
+        self.assertEqual([(a.notes[0].start_sec, a.notes[0].end_sec)
+                          for a in result.assignments], [(0, .4), (.4, .7), (.7, 1)])
+        self.assertFalse(result.omitted_mora_ids)
+        self.assertFalse(result.omitted_source_note_ids)
+
+    def test_acoustic_groups_do_not_share_notes_with_other_windows(self):
+        source = multiline_document(("カ", "キ", "ク"), (.1, .4, .7), (
+            note("shared", 0, .6),
+        ))
+        result = optimize_note_runs(
+            source, preserving_config(),
+            utterance_groups=(("u0", "u1"), ("u2",)),
+        )
+        self.assertEqual([a.kana for a in result.assignments], ["カ", "キ"])
+        self.assertEqual(result.omitted_mora_ids, ("m2-0-0",))
+
+    def test_acoustic_group_does_not_recover_a_head_without_usable_timing(self):
+        source = multiline_document(("カ", "キ"), (.1, .4), (
+            note("shared", 0, 1),
+        ), confidences=(.9, 1e-8))
+        expected = optimize_note_runs(source, preserving_config())
+        actual = optimize_note_runs(source, preserving_config(),
+                                    utterance_groups=(("u0", "u1"),))
+        self.assertEqual(actual, expected)
+        self.assertEqual(actual.omitted_mora_ids, ("m1-0-0",))
+
+    def test_acoustic_groups_require_an_ordered_complete_partition(self):
+        source = multiline_document(("カ", "キ"), (.1, .4), (note("n", 0, 1),))
+        for groups in [(), (("u0",),), (("u1", "u0"),),
+                       (("u0", "u0", "u1"),), ((), ("u0", "u1"))]:
+            with self.subTest(groups=groups), self.assertRaisesRegex(
+                    ValueError, "partition every utterance in order"):
+                optimize_note_runs(source, utterance_groups=groups)
+
     def test_partitioned_candidate_reduces_search_without_changing_result(self):
         size = 24
         source = document(

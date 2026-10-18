@@ -1405,10 +1405,20 @@ def analyze_audio(
             events = tuple(adapters.vocalization_reattacks(components[0], start, end))
             if len(events) >= len(components):
                 reattacks[f"u{index}"] = events
+    utterance_groups = None
+    if overlay is not None:
+        # Authored newlines are canonical boundaries, not new melody boundaries.
+        # Decode each measured CTC window jointly so a crossing source note can
+        # still be shared by syllables on either side of an authored newline.
+        acoustic_owners: dict[int, list[str]] = {}
+        for index, group in enumerate(overlay["groups"]):
+            acoustic_owners.setdefault(group.get("acoustic_group_index", index), []).append(f"u{index}")
+        utterance_groups = tuple(tuple(ids) for ids in acoustic_owners.values())
     result = compile_score(
         observations,
         config=NoteRunConfig(whisper_boundary_cost_per_sec2=.1),
         line_windows_by_utterance=line_windows,
+        utterance_groups=utterance_groups,
         vocalization_reattacks_by_utterance=reattacks if reattacks else None,
     )
     if allow_spoken:

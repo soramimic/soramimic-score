@@ -553,6 +553,7 @@ def run_stage3_document(
     config: NoteRunConfig | None = None,
     segment_ids_by_mora: Mapping[str, str] | None = None,
     line_windows_by_utterance: Mapping[str, tuple[float, float]] | None = None,
+    utterance_groups: Sequence[Sequence[str]] | None = None,
     vocalization_reattacks_by_utterance: Mapping[
         str, Sequence[VocalizationReattack]
     ] | None = None,
@@ -612,6 +613,7 @@ def run_stage3_document(
     note_run = optimize_note_runs(
         pitched, settings, segment_ids_by_mora=segments,
         line_windows_by_utterance=line_windows_by_utterance,
+        utterance_groups=utterance_groups,
     )
     linked, correspondences = _materialize_note_run(document, note_run, settings)
     realization = compile_realization(linked)
