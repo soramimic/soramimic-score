@@ -758,13 +758,16 @@ def optimize_note_runs(
     *,
     segment_ids_by_mora: Mapping[str, str] | None = None,
     line_windows_by_utterance: Mapping[str, tuple[float, float]] | None = None,
+    utterance_groups: Sequence[Sequence[str]] | None = None,
 ) -> NoteRunResult:
     """Allocate lyric syllables while retaining source-note pitch boundaries.
 
     ``segment_ids_by_mora`` should be derived from the selected lyrics (for
     example bunsetsu-like groups), never from reference/XF note truth. Optional
     line windows must be recognized lyric intervals keyed by utterance ID,
-    optionally adjusted to nearby melody rests.
+    optionally adjusted to nearby melody rests. ``utterance_groups`` may retain
+    shared acoustic windows across authored lines. It must partition all
+    utterances in order; assignments still preserve each line's syllables.
     """
     if not isinstance(document, IntermediateRepresentation):
         raise TypeError("document must be an IntermediateRepresentation")
@@ -802,6 +805,12 @@ def optimize_note_runs(
                     and not math.isclose(start_sec, previous_end, abs_tol=1e-9)):
                 raise ValueError("Whisper line windows must not overlap or go backward")
             previous_end = end_sec
+    groups = tuple(tuple(group) for group in utterance_groups) if utterance_groups is not None else ()
+    if utterance_groups is not None and (
+            any(not group for group in groups)
+            or tuple(identifier for group in groups for identifier in group)
+            != tuple(identifier for identifier, _ in phrases)):
+        raise ValueError("utterance groups must partition every utterance in order")
     anchors = []
     for phrase_index, (utterance_id, units) in enumerate(phrases):
         times = [unit.ctc_onset_sec for unit in units if unit.ctc_onset_sec is not None
@@ -852,6 +861,50 @@ def optimize_note_runs(
             utterance_id, frozenset(),
         ),
     ) for utterance_id, units in phrases)
+    if groups:
+        by_id = dict(phrases)
+        paths_by_id = dict(zip((identifier for identifier, _ in phrases), paths, strict=True))
+        selected_paths = []
+        for group in groups:
+            originals = tuple(paths_by_id[identifier] for identifier in group)
+            omitted = {mid for path in originals for step in path.steps
+                       for mid in step.omitted_mora_ids}
+            shared_head = False
+            for left_id, right_id in zip(group, group[1:]):
+                left_units, right_units = by_id[left_id], by_id[right_id]
+                if not left_units or not right_units:
+                    continue
+                left, right = left_units[-1], right_units[0]
+                if (not omitted.intersection(right.mora_ids) or right.is_special
+                        or not left.onset_supports_timing or not right.onset_supports_timing
+                        or left.ctc_onset_sec is None or right.ctc_onset_sec is None):
+                    continue
+                if any(note.start_sec <= left.ctc_onset_sec <= right.ctc_onset_sec < note.end_sec
+                       for note in note_groups[left_id]):
+                    shared_head = True
+                    break
+            if not shared_head:
+                selected_paths.extend(originals)
+                continue
+            joint = _optimize_phrase(
+                tuple(unit for identifier in group for unit in by_id[identifier]),
+                tuple(note for identifier in group for note in note_groups[identifier]),
+                settings, line_windows_by_utterance=line_windows_by_utterance,
+                required_note_ids=frozenset(note_id for identifier in group
+                                           for note_id in required_notes_by_utterance.get(identifier, ())),
+            )
+            joint_omitted = {mid for step in joint.steps for mid in step.omitted_mora_ids}
+            def assigned_notes(paths):
+                return {note_id for path in paths for step in path.steps
+                        if step.assignment is not None for note in step.assignment.notes
+                        for note_id in note.source_note_ids}
+            # A boundary repair must retain every previously sung mora and
+            # source note; fewer omissions elsewhere cannot hide a new loss.
+            if joint_omitted < omitted and assigned_notes(originals) <= assigned_notes((joint,)):
+                selected_paths.append(joint)
+            else:
+                selected_paths.extend(originals)
+        paths = tuple(selected_paths)
     assignments = tuple(step.assignment for path in paths for step in path.steps
                         if step.assignment is not None)
     assignments = _resolve_splits(
