@@ -859,7 +859,8 @@ def analyze_audio(
     unobserved_lines = ()
     lines = recognized
     if lyrics is not None:
-        from .supplied_lyrics import (prepare_supplied_audio, restore_authored_lines,
+        from .supplied_lyrics import (expand_alignment_windows, prepare_supplied_audio,
+                                     restore_authored_lines,
                                      select_authored_readings)
         lines, overlay, unobserved_lines = prepare_supplied_audio(
             path, lyrics, recognized, notes, adapters, adjust_lyrics=adjust_lyrics,
@@ -911,6 +912,10 @@ def analyze_audio(
         overlay.pop("acoustic_changes", None)
         overlay["readings_fixed_before_alignment"] = True
     lines = tuple(replace(line, text=strip_ruby(line.text)) for line in lines)
+    if overlay is not None:
+        lines, readings, unobserved_lines = expand_alignment_windows(
+            lines, readings, overlay, unobserved_lines)
+        active_indices = [i for i in range(len(lines)) if i not in unobserved_lines]
     # A failure is reported. Do not fall back to the rejected ASR pronunciation.
     if on_progress:
         on_progress("モーラの時刻を推定しています")

@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 
 
 _TIMESTAMP_EPSILON_SEC = 1e-6
+# Bound only newly joined CTC targets; existing long windows remain unchanged.
+_MAX_CTC_CONTEXT_SEC = 60.
 
 
 def _has_duration(start, end):
@@ -108,8 +110,8 @@ def plan_supplied_lyrics(
     }
 
 
-def locate_supplied_groups(plan, recognized, duration):
-    """Bound unmatched text by its neighboring anchors and the recording limits."""
+def _locate_groups(plan, recognized, duration):
+    """Locate raw groups before resolving touching recognition boundaries."""
     groups = [dict(group) for group in plan["groups"]]
     for index, group in enumerate(groups):
         if group["operation"] in {"match", "add", "repeat"}:
@@ -124,6 +126,14 @@ def locate_supplied_groups(plan, recognized, duration):
                 start_sec=recognized[left["asr_indices"][-1]].end_sec if left else 0.,
                 end_sec=recognized[right["asr_indices"][0]].start_sec if right else duration,
             )
+    return groups
+
+
+def locate_supplied_groups(plan, recognized, duration):
+    """Keep the reading-selection windows independent of CTC context expansion."""
+    groups = _locate_groups(plan, recognized, duration)
+    for index, group in enumerate(groups):
+        group["location_group_indices"] = [index]
     # A missing phrase can be inside a coarse, touching Whisper interval. Align
     # it jointly with a neighbor instead of inventing a fractional timestamp.
     index = 0
@@ -136,6 +146,7 @@ def locate_supplied_groups(plan, recognized, duration):
         left, right = groups[start:start + 2]
         groups[start:start + 2] = [{
             "operation": "retain_supplied", "reading_source": "supplied-lyrics",
+            "location_group_indices": left["location_group_indices"] + right["location_group_indices"],
             "supplied_indices": left["supplied_indices"] + right["supplied_indices"],
             "asr_indices": left["asr_indices"] + right["asr_indices"],
             "display_text": left["display_text"] + "\n" + right["display_text"],
@@ -160,6 +171,16 @@ def prepare_supplied_audio(path, supplied, recognized, notes, adapters, *, adjus
         raise AudioPipelineError("lyrics", "recording duration must be finite and nonnegative")
     plan = plan_supplied_lyrics(supplied, recognized, reading=adapters.lyric_reading,
                                 add_missing=adjust_lyrics)
+    located = _locate_groups(plan, recognized, duration)
+    # A zero-duration gap does not identify which neighbor contains the omitted
+    # phrase. Retain both anchors for a later, joint CTC target, after readings
+    # and support decisions have been fixed using the original windows.
+    plan["ctc_context_edges"] = [
+        [index, neighbor]
+        for index, group in enumerate(located)
+        if not _has_duration(group["start_sec"], group["end_sec"])
+        for neighbor in (index - 1, index + 1) if 0 <= neighbor < len(located)
+    ]
     groups = locate_supplied_groups(plan, recognized, duration)
     windows = [(g["start_sec"], g["end_sec"]) for g in groups
                if _has_duration(g["start_sec"], g["end_sec"])]
@@ -275,6 +296,116 @@ def select_authored_readings(lines, select):
     return tuple(output)
 
 
+def _authored_groups(group, parts):
+    """Keep each authored line's provenance when CTC joins reading windows."""
+    if "authored_line_groups" in group:
+        return group["authored_line_groups"]
+    indices = group["supplied_indices"]
+    if len(parts) > 1 and indices and len(indices) != len(parts):
+        raise ValueError("authored lines do not match supplied lyric provenance")
+    originals = group.get("supplied_display_text", group["display_text"]).split("\n")
+    output = []
+    for index, part in enumerate(parts):
+        item = dict(group)
+        if len(parts) > 1:
+            item["supplied_indices"] = indices[index:index + 1]
+            item.pop("supplied_display_text", None)
+            item.pop("parenthetical_readings", None)
+            if "parenthetical_readings" in part.detail:
+                item.update(supplied_display_text=originals[index],
+                            parenthetical_readings=part.detail["parenthetical_readings"])
+        output.append(item)
+    return output
+
+
+def expand_alignment_windows(lines, readings, overlay, unobserved):
+    """Join CTC targets around unresolved gaps without reselecting readings.
+
+    Unsupported/removed groups are barriers. A chain of missing recognition
+    anchors must not grow a newly joined target beyond the resource bound.
+    Original reading windows and per-line support remain auditable separately.
+    """
+    from dataclasses import replace
+    from .audio import ReadingSelection
+
+    groups = overlay["groups"]
+    owners = {raw: index for index, group in enumerate(groups)
+              for raw in group["location_group_indices"]}
+    parents = list(range(len(groups)))
+
+    def root(index):
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    for left, right in overlay["ctc_context_edges"]:
+        if left not in owners or right not in owners:
+            continue
+        a, b = sorted((owners[left], owners[right]))
+        if any(i in unobserved for i in range(a, b + 1)):
+            continue
+        a, b = root(a), root(b)
+        if a == b:
+            continue
+        members = [i for i in range(len(groups)) if root(i) in (a, b)]
+        start, end = lines[members[0]].start_sec, lines[members[-1]].end_sec
+        if end - start > _MAX_CTC_CONTEXT_SEC:
+            continue
+        parents[b] = a
+    components = []
+    for index in range(len(groups)):
+        if not components or root(components[-1][0]) != root(index):
+            components.append([])
+        components[-1].append(index)
+    if all(len(ids) == 1 for ids in components):
+        return lines, readings, unobserved
+
+    target_lines, target_readings, target_groups, target_unobserved = [], [], [], []
+    for target, ids in enumerate(components):
+        if len(ids) == 1:
+            index = ids[0]
+            target_lines.append(lines[index])
+            target_readings.append(readings[index])
+            target_groups.append(groups[index])
+            if index in unobserved:
+                target_unobserved.append(target)
+        else:
+            parts, provenance = [], []
+            for index in ids:
+                reading = readings[index]
+                children = reading.detail.get("authored_line_readings")
+                children = [ReadingSelection(**part) for part in children] if children else [reading]
+                parts.extend(children)
+                provenance.extend(_authored_groups(groups[index], children))
+            kana = "".join(part.kana for part in parts)
+            target_lines.append(replace(lines[ids[0]],
+                text="\n".join(lines[i].text for i in ids), end_sec=lines[ids[-1]].end_sec))
+            target_readings.append(ReadingSelection(
+                kana, "supplied-lines", min(part.confidence for part in parts), (kana,),
+                {"authored_line_readings": [asdict(part) for part in parts]},
+            ))
+            target_groups.append({
+                "operation": "retain_supplied", "reading_source": "supplied-lyrics",
+                "supplied_indices": [s for i in ids for s in groups[i]["supplied_indices"]],
+                "asr_indices": [s for i in ids for s in groups[i]["asr_indices"]],
+                "display_text": target_lines[-1].text,
+                "original_text": "\n".join(groups[i]["original_text"] for i in ids
+                                             if groups[i]["original_text"]),
+                "original_acoustic_reading": "".join(groups[i]["original_acoustic_reading"] for i in ids),
+                "similarity": None, "start_sec": target_lines[-1].start_sec,
+                "end_sec": target_lines[-1].end_sec, "alignment_status": "pending",
+                "acoustic_reading": kana, "reading_candidates": [kana],
+                "reading_stage_group_indices": ids, "authored_line_groups": provenance,
+            })
+        target_groups[-1] = target_groups[-1] | {
+            "line_indices": [target], "utterance_ids": [f"u{target}"],
+        }
+    overlay["reading_stage_groups"] = groups
+    overlay["groups"] = target_groups
+    return tuple(target_lines), tuple(target_readings), tuple(target_unobserved)
+
+
 def restore_authored_lines(lines, readings, moras, overlay, unobserved):
     """Restore input boundaries using exact selected mora counts and CTC times."""
     from dataclasses import replace
@@ -289,6 +420,7 @@ def restore_authored_lines(lines, readings, moras, overlay, unobserved):
         parts = reading.detail.get("authored_line_readings")
         parts = tuple(ReadingSelection(**part) for part in parts) if parts else (reading,)
         texts = line.text.split("\n") if len(parts) > 1 else (line.text,)
+        provenance = _authored_groups(group, parts)
         offset = 0
         for part_index, (text, part) in enumerate(zip(texts, parts, strict=True)):
             target = len(restored_lines)
@@ -306,26 +438,15 @@ def restore_authored_lines(lines, readings, moras, overlay, unobserved):
             restored_moras.extend(aligned)
             if index in unobserved:
                 restored_unobserved.append(target)
-            supplied_indices = group["supplied_indices"]
-            if len(parts) > 1 and len(supplied_indices) != len(parts):
-                raise ValueError("authored lines do not match supplied lyric provenance")
-            restored_group = group | {
+            restored_group = provenance[part_index] | {
                 "display_text": text, "acoustic_reading": part.kana,
                 "reading_candidates": list(part.candidates),
-                "supplied_indices": [supplied_indices[part_index]] if len(parts) > 1 else supplied_indices,
                 "line_indices": [target], "utterance_ids": [f"u{target}"],
                 "start_sec": start if start is not None else group["start_sec"],
                 "end_sec": end if end is not None else group["end_sec"],
+                "alignment_status": group["alignment_status"],
                 "acoustic_group_index": index, "shared_acoustic_window": len(parts) > 1,
             }
-            if len(parts) > 1:
-                restored_group.pop("parenthetical_readings", None)
-                restored_group.pop("supplied_display_text", None)
-                if "parenthetical_readings" in part.detail:
-                    restored_group.update(
-                        parenthetical_readings=part.detail["parenthetical_readings"],
-                        supplied_display_text=group["supplied_display_text"].split("\n")[part_index],
-                    )
             restored_groups.append(restored_group)
     overlay["acoustic_groups"] = overlay["groups"]
     overlay["groups"] = restored_groups
