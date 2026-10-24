@@ -28,7 +28,12 @@ from .japanese import SPECIAL_MORAS, kana_to_syllables
 
 @dataclass(frozen=True)
 class NoteRunConfig:
-    """Nonnegative costs for the note-preserving dynamic program."""
+    """Nonnegative costs for the note-preserving dynamic program.
+
+    ``ctc_timing_priority`` permits skipping extra notes without a fixed opening
+    cost and bounds assignments by usable CTC onsets. A lyric-timing-policy
+    observation can restrict that preference to verified supplied utterances.
+    """
 
     ctc_onset_weight: float = 0.11258317857582528
     ctc_onset_scale_sec: float = 0.10
@@ -44,17 +49,20 @@ class NoteRunConfig:
     segment_rest_duration_weight: float = 0.6299605249474366
     rest_gap_threshold_sec: float = 0.04
     same_pitch_merge_gap_sec: float = 0.02
+    ctc_timing_priority: bool = False
 
     def __post_init__(self) -> None:
         values = tuple(
             value for key, value in asdict(self).items()
-            if key != "ctc_onset_scale_sec"
+            if key not in {"ctc_onset_scale_sec", "ctc_timing_priority"}
         )
         if any(not math.isfinite(value) or value < 0 for value in values):
             raise ValueError("note-run weights and thresholds must be finite and nonnegative")
         if (not math.isfinite(self.ctc_onset_scale_sec)
                 or self.ctc_onset_scale_sec <= 0):
             raise ValueError("ctc_onset_scale_sec must be finite and positive")
+        if type(self.ctc_timing_priority) is not bool:
+            raise ValueError("ctc_timing_priority must be a boolean")
 
 
 @dataclass(frozen=True)
@@ -324,7 +332,7 @@ def _note_only(
         return None
     duration = sum(note.end_sec - note.start_sec for note in notes)
     cost = NoteRunCost(
-        note_only_open=config.note_only_open_weight,
+        note_only_open=0.0 if config.ctc_timing_priority else config.note_only_open_weight,
         note_only_duration=config.note_only_duration_weight * duration,
     )
     return NoteOnlySpan(
@@ -496,6 +504,10 @@ def _search_phrase(
                         starts.insert(0, previous_index)
                 for start_note in starts:
                     split = start_note < cursor
+                    if (config.ctc_timing_priority and group[0].onset_supports_timing
+                            and not notes[start_note].start_sec - .12
+                            <= float(group[0].ctc_onset_sec) <= notes[start_note].end_sec + .12):
+                        continue
                     if (group[0].independent_phase and not notes[start_note].start_sec - .12
                             <= float(group[0].ctc_onset_sec) <= notes[start_note].end_sec + .12):
                         continue
@@ -780,6 +792,13 @@ def optimize_note_runs(
         raise ValueError("note candidates must be supplied in chronological order")
     settings = config or NoteRunConfig()
     phrases = _units(document, segment_ids_by_mora)
+    priority_owners = next((set(item.detail["ctc_priority_utterance_ids"])
+                            for item in document.evidence if item.kind == "lyric-timing-policy"), None)
+    phrase_settings = {
+        identifier: (replace(settings, ctc_timing_priority=False)
+                     if priority_owners is not None and identifier not in priority_owners
+                     else settings) for identifier, _ in phrases
+    }
     required_notes_by_utterance: dict[str, frozenset[str]] = {}
     for item in document.evidence:
         if item.kind != "repeated-vocalization-expansion":
@@ -855,7 +874,7 @@ def optimize_note_runs(
         # let every canonical unit remain unresolved.
         note_groups[phrases[0][0]].extend(document.note_candidates)
     paths = tuple(_optimize_phrase(
-        units, note_groups[utterance_id], settings,
+        units, note_groups[utterance_id], phrase_settings[utterance_id],
         line_windows_by_utterance=line_windows_by_utterance,
         required_note_ids=required_notes_by_utterance.get(
             utterance_id, frozenset(),
@@ -866,6 +885,8 @@ def optimize_note_runs(
         paths_by_id = dict(zip((identifier for identifier, _ in phrases), paths, strict=True))
         selected_paths = []
         for group in groups:
+            joint_settings = (settings if all(phrase_settings[i].ctc_timing_priority for i in group)
+                              else replace(settings, ctc_timing_priority=False))
             originals = tuple(paths_by_id[identifier] for identifier in group)
             omitted = {mid for path in originals for step in path.steps
                        for mid in step.omitted_mora_ids}
@@ -889,7 +910,7 @@ def optimize_note_runs(
             joint = _optimize_phrase(
                 tuple(unit for identifier in group for unit in by_id[identifier]),
                 tuple(note for identifier in group for note in note_groups[identifier]),
-                settings, line_windows_by_utterance=line_windows_by_utterance,
+                joint_settings, line_windows_by_utterance=line_windows_by_utterance,
                 required_note_ids=frozenset(note_id for identifier in group
                                            for note_id in required_notes_by_utterance.get(identifier, ())),
             )
@@ -898,9 +919,10 @@ def optimize_note_runs(
                 return {note_id for path in paths for step in path.steps
                         if step.assignment is not None for note in step.assignment.notes
                         for note_id in note.source_note_ids}
-            # A boundary repair must retain every previously sung mora and
-            # source note; fewer omissions elsewhere cannot hide a new loss.
-            if joint_omitted < omitted and assigned_notes(originals) <= assigned_notes((joint,)):
+            # A repair retains every previously sung mora. Note-preserving
+            # mode also retains source notes; verified CTC may leave extras.
+            if joint_omitted < omitted and (joint_settings.ctc_timing_priority
+                    or assigned_notes(originals) <= assigned_notes((joint,))):
                 selected_paths.append(joint)
             else:
                 selected_paths.extend(originals)

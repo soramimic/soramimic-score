@@ -53,6 +53,23 @@ def _ctc_token_id(char, token_ids):
     raise ValueError(f"CTC vocabulary does not support {char!r}")
 
 
+def _align_ctc_spans(emission, targets, blank, *, free_edges=False):
+    """Return target spans, optionally absorbing untranscribed audio at the edges."""
+    import torch
+    import torchaudio.functional as taf
+
+    star = None
+    required = len(targets) + sum(a == b for a, b in zip(targets, targets[1:]))
+    if free_edges and len(emission) >= required + 2:
+        star = emission.shape[1]
+        emission = torch.cat((emission, emission.new_zeros((len(emission), 1))), dim=1)
+        targets = [star, *targets, star]
+    alignment, scores = taf.forced_align(emission.unsqueeze(0).float(),
+                                         torch.tensor([targets]), blank=blank)
+    return [span for span in taf.merge_tokens(alignment[0], scores[0].exp(), blank=blank)
+            if span.token != star]
+
+
 def _transcribe_shared_kana(shared, source: Path, windows):
     """Match the worker's ordered, 24-second window contract without changing callers' order."""
     if any(not math.isfinite(start + end) or start < 0 or end <= start
@@ -271,7 +288,7 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
 
     emission_cache = {}
 
-    def align(path, lines, readings):
+    def align(path, lines, readings, *, free_edges=False):
         readings = _validate_readings(lines, readings)
         moras = [kana_to_moras(reading.kana) for reading in readings]
         logger.info("発音時刻を推定しています")
@@ -356,9 +373,7 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
             if not targets or hi - lo < required:
                 raise CTCWindowCapacityError(indices[0] if len(indices) == 1 else None,
                                              hi - lo, required)
-            alignment, scores = taf.forced_align(probs[lo:hi].unsqueeze(0).float(),
-                                                 torch.tensor([targets]), blank=blank)
-            spans = taf.merge_tokens(alignment[0], scores[0].exp(), blank=blank)
+            spans = _align_ctc_spans(probs[lo:hi], targets, blank, free_edges=free_edges)
             grouped = {}
             for span, owner in zip(spans, owners, strict=True):
                 grouped.setdefault(owner, []).append(span)
@@ -642,6 +657,9 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
     def template_recoverer(path, start, end):
         return recover_window(path, start, end, language=None)
 
+    def supplied_align(path, lines, readings):
+        return align(path, lines, readings, free_edges=True)
+
     return AudioAdapters(select_readings if config.acoustic_readings else dictionary_readings,
                          align, melody, recognize, lyric_reading, recover_window,
                          repeat_evidence, vocal_activity if vocals_path is not None else None,
@@ -655,4 +673,4 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
                          if config.romaji_model is not None and vocals_path is not None else None,
                          audio_duration, dictionary_readings,
                          supplied_readings if config.acoustic_readings else None,
-                         template_recoverer)
+                         template_recoverer, supplied_align)

@@ -91,6 +91,25 @@ def preserving_config(**changes):
 
 
 class NoteRunOptimizationTests(unittest.TestCase):
+    def test_ctc_priority_can_leave_extra_pitched_notes_unassigned(self):
+        source = document("カ", (.4,), (note("extra", .2, .3), note("sung", .4, .6)))
+        config = preserving_config(note_only_duration_weight=.5)
+        ordinary = optimize_note_runs(source, config)
+        conservative = optimize_note_runs(source, replace(config, ctc_timing_priority=True))
+        self.assertNotIn("extra", conservative.assignments[0].notes[0].source_note_ids)
+        self.assertEqual(conservative.omitted_source_note_ids, ("extra",))
+        self.assertFalse(conservative.omitted_mora_ids)
+        self.assertNotEqual(ordinary.assignments, conservative.assignments)
+
+    def test_unverified_or_automatically_added_utterance_keeps_note_priority(self):
+        source = document("カ", (.4,), (note("extra", .2, .3), note("sung", .4, .6)))
+        source = replace(source, evidence=source.evidence + (Evidence(
+            "policy", "test", "lyric-timing-policy", 1., {"ctc_priority_utterance_ids": []}),))
+        config = preserving_config(note_only_duration_weight=.5)
+        ordinary = optimize_note_runs(source, config)
+        actual = optimize_note_runs(source, replace(config, ctc_timing_priority=True))
+        self.assertEqual(ordinary, actual)
+
     def test_shared_acoustic_window_can_split_one_note_across_authored_lines(self):
         source = multiline_document(("カ", "キク"), (.1, .4, .7), (
             note("shared", 0, 1),

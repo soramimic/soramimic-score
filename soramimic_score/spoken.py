@@ -56,6 +56,7 @@ def add_spoken_fallback(
     line_windows: Mapping[str, tuple[float, float]],
     vocal_activity: Callable[[Sequence[tuple[float, float]]], Sequence[VocalActivity]],
     *, fill_unpitched_lines: bool = False,
+    eligible_utterance_ids: frozenset[str] | None = None,
 ) -> ScoreDocument:
     """Fill only unresolved, timed units with locally supported vocal activity.
 
@@ -89,6 +90,8 @@ def add_spoken_fallback(
                 or not has_usable_timing(unit.end)):
             continue
         utterance = utterances[unit.mora_ids[0]]
+        if eligible_utterance_ids is not None and utterance not in eligible_utterance_ids:
+            continue
         if utterance not in line_windows:
             continue
         lo, hi = line_windows[utterance]
@@ -99,6 +102,10 @@ def add_spoken_fallback(
             if utterances[following.mora_ids[0]] == utterance:
                 end = (following.consonant_start.time_sec
                        if has_usable_timing(following.consonant_start) else unit.end.time_sec)
+            elif eligible_utterance_ids is not None:
+                end = unit.end.time_sec
+        elif eligible_utterance_ids is not None:
+            end = unit.end.time_sec
         end = min(end, hi)
         position = bisect_right(starts, start)
         if position and plan[position - 1].end_sec > start:
@@ -144,7 +151,10 @@ def add_spoken_fallback(
             {"singing_unit_id": unit_id, "start_sec": start, "end_sec": end,
              "vocal_activity": asdict(support),
              "extension_vocal_activity": asdict(extension), "render_midi_pitch": 60,
-             "measured_pitch": False, "condition": "automatic-aligned-voiced-unresolved"},
+             "measured_pitch": False,
+             "condition": ("verified-supplied-voiced-unresolved"
+                           if eligible_utterance_ids is not None
+                           else "automatic-aligned-voiced-unresolved")},
         ))
         added.append(SynthesisSlot(
             f"spoken-slot-{unit_id}", utterance, unit_id, performed.mora_ids,
