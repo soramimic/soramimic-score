@@ -215,6 +215,17 @@ def verify_supplied_alignment(path, lines, readings, moras, overlay, unobserved,
         group["ctc_alignment"] = audit
         if unmatched and not verified and not group.get("shared_acoustic_window"):
             audit.setdefault("initial_moras", [asdict(m) for m in original])
+            if group.get("support", {}).get("melody"):
+                # Failed independent recognition cannot establish absence of a
+                # pitched supplied phrase. Keep its original soft CTC evidence
+                # for note assignment, without accepting an unverified retry,
+                # granting CTC precedence, or enabling spoken fallback.
+                selected = original
+                audit.pop("selected", None)
+                audit["quality"] = _quality(original)
+                audit["retained_for_note_assignment"] = True
+                output.extend(selected)
+                continue
             group["alignment_status"] = "ctc-unresolved"
             missing.add(index)
             updated_lines[index] = replace(line, start_sec=None, end_sec=None)

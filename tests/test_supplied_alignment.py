@@ -11,6 +11,46 @@ from soramimic_score.japanese import kana_to_moras
 
 
 class SuppliedAlignmentTests(unittest.TestCase):
+    def test_unverified_pitched_phrase_keeps_original_observations_not_a_retry(self):
+        lines = (LyricLine("カキ", 0, 10),)
+        readings = (ReadingSelection("カキ", "test", 1),)
+        original = (AlignedMora(0, 0, "カ", 1, 1.1, .01),
+                    AlignedMora(0, 1, "キ", 1.3, 1.4, .01))
+        retry = (AlignedMora(0, 0, "カ", 8, 8.1, .9),
+                 AlignedMora(0, 1, "キ", 8.3, 8.4, .9))
+        adapters = AudioAdapters(lambda *_: readings, lambda *_: original, lambda _: (),
+            supplied_mora_aligner=lambda *_: retry,
+            repetition_evidence=lambda _p, windows: tuple("サシスセソ" for _ in windows))
+        overlay = {"groups": [{"operation": "retain_supplied", "supplied_indices": [0],
+                                "asr_indices": [], "support": {"melody": True}}]}
+        result = verify_supplied_alignment(Path("input.wav"), lines, readings, original,
+                                           overlay, (), adapters)
+        self.assertEqual(result, (lines, readings, original, ()))
+        group = overlay["groups"][0]
+        self.assertFalse(group["ctc_verified"])
+        self.assertTrue(group["ctc_alignment"]["retained_for_note_assignment"])
+        self.assertNotIn("selected", group["ctc_alignment"])
+        self.assertTrue(group["ctc_alignment"]["attempts"])
+
+    def test_matched_singing_keeps_notes_despite_a_late_ctc_onset(self):
+        adapters = AudioAdapters(
+            lambda *_: (ReadingSelection("カキ", "test", 1),),
+            lambda *_: (AlignedMora(0, 0, "カ", .65, .7, .9),
+                        AlignedMora(0, 1, "キ", .85, .9, .9)),
+            lambda _: (MelodyNote(0, .4, 60), MelodyNote(.6, 1., 62)),
+            lambda _: (LyricLine("カキ", 0, 1.2),),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "input.wav"
+            path.touch()
+            result = analyze_audio(path, adapters, lyrics=("カキ",))
+        self.assertEqual([(slot.kana, slot.start_sec, slot.midi_pitch)
+                          for slot in result.score.synthesis_plan],
+                         [("カ", 0, 60), ("キ", .6, 62)])
+        policy = next(e for e in result.observations.evidence if e.kind == "lyric-timing-policy")
+        self.assertEqual(policy.detail["ctc_priority_utterance_ids"], [])
+        self.assertTrue(lyric_surface(result)["groups"][0]["ctc_verified"])
+
     def test_weak_child_of_joint_alignment_keeps_observations_without_speech_permission(self):
         lines = (LyricLine("カキ", 0, 3),)
         readings = (ReadingSelection("カキ", "test", 1),)
