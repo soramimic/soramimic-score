@@ -1371,7 +1371,9 @@ def analyze_audio(
         ), Evidence(
             "audio-lyric-timing-policy", "soramimic_score.audio", "lyric-timing-policy", 1.,
             {"ctc_priority_utterance_ids": [f"u{i}" for i, group in enumerate(overlay["groups"])
-                                             if group["supplied_indices"] and group.get("ctc_verified")]},
+                                             if group["supplied_indices"]
+                                             and group["operation"] == "retain_supplied"
+                                             and group.get("ctc_verified")]},
         ),))
     if adjust_lyrics and overlay is not None:
         observations = replace(observations, evidence=observations.evidence + (Evidence(
