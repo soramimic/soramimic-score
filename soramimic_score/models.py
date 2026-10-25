@@ -581,8 +581,15 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
             })
         return finish(result)
 
+    @lru_cache(maxsize=512)
+    def location_reading(text):
+        return dictionary_readings(None, (LyricLine(text),))[0]
+
     def lyric_reading(text):
-        return dictionary_readings(None, (LyricLine(text),))[0].kana
+        return location_reading(text).kana
+
+    def lyric_reading_candidates(text):
+        return location_reading(text).candidates
 
     def repeat_evidence(path, windows):
         source = vocals_path or path
@@ -673,4 +680,4 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
                          if config.romaji_model is not None and vocals_path is not None else None,
                          audio_duration, dictionary_readings,
                          supplied_readings if config.acoustic_readings else None,
-                         template_recoverer, supplied_align)
+                         template_recoverer, supplied_align, lyric_reading_candidates)

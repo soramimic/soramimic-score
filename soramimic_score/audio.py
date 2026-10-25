@@ -105,7 +105,10 @@ class AudioAdapters:
 
     ``lyric_recognizer`` is required by the ASR-first audio pipeline.
     ``lyric_reading`` optionally supplies linguistic readings for whole-line
-    comparison (otherwise normalized surface text is used). ``lyric_recoverer``
+    comparison (otherwise normalized surface text is used). The optional
+    ``lyric_reading_candidates`` supplies closed pronunciation alternatives for
+    locating unmatched supplied lyrics without additional recognition.
+    ``lyric_recoverer``
     can retry one singing window when Whisper emits a credit template. The
     optional ``template_lyric_recoverer`` retries template spans without a fixed
     recognition language. The reading, mora, and melody adapters are required
@@ -134,6 +137,7 @@ class AudioAdapters:
     ] | None = None
     template_lyric_recoverer: LyricRecoverer | None = None
     supplied_mora_aligner: MoraAligner | None = None
+    lyric_reading_candidates: Callable[[str], Sequence[str]] | None = None
 
 
 class AudioPipelineError(RuntimeError):
