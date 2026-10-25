@@ -10,7 +10,7 @@ import wave
 from unittest.mock import patch
 import requests
 
-from soramimic_score import ModelConfig, LyricLine, analyze_audio, load
+from soramimic_score import ModelConfig, LyricLine, ReadingSelection, analyze_audio, load
 from soramimic_score.audio import CTCWindowCapacityError
 from soramimic_score.__main__ import analyze_main
 from soramimic_score.models import (_align_ctc_spans, _ctc_token_id, _transcribe_shared_kana, create_adapters,
@@ -20,6 +20,16 @@ from tests import test_audio_pipeline as fixtures
 
 
 class ModelTests(unittest.TestCase):
+    def test_location_candidates_reuse_default_dictionary_lookup_without_audio(self):
+        adapters = create_adapters(self.config)
+        selection = ReadingSelection('ゴヒャクロクジューナナ', 'dictionary', .9,
+                                     ('ゴヒャクロクジューナナ', 'ゴーロクナナ'))
+        with patch('soramimic_score.models.dictionary_readings', return_value=(selection,)) as lookup:
+            self.assertEqual(adapters.lyric_reading('567'), selection.kana)
+            self.assertEqual(adapters.lyric_reading_candidates('567'), selection.candidates)
+            self.assertEqual(adapters.lyric_reading_candidates('567'), selection.candidates)
+            lookup.assert_called_once_with(None, (LyricLine('567'),))
+
     @unittest.skipUnless(importlib.util.find_spec("torch") and importlib.util.find_spec("torchaudio"),
                          "audio dependencies not installed")
     def test_supplied_ctc_skips_untranscribed_audio_without_exporting_wildcards(self):
