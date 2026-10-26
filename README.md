@@ -103,14 +103,19 @@ flowchart TD
 | Vocal2Midi | 68.9% | 39.7% | 29.5% |
 | VocalParse | 1.8% | 0.1% | 0.0% |
 | Synthesizer V Studio 2 Pro | 55.5% | 60.0% | 38.0% |
+| MuScriptor + soramimic-score | 49.1% | 67.4% | 43.1% |
 
-STARS、Vocal2Midi、VocalParse、Synthesizer V の音高は採点時に一律 12 半音上げています。STARS には 1 モーラを 1 単位として渡し、推定されたその区間と音符の重なりから読みを対応付けました。STARS は音素ごとの時刻も出力します。
+STARS、Vocal2Midi、VocalParse、Synthesizer V、MuScriptor + soramimic-score の音高は採点時に一律 12 半音上げています。STARS には 1 モーラを 1 単位として渡し、推定されたその区間と音符の重なりから読みを対応付けました。STARS は音素ごとの時刻も出力します。
 
 Synthesizer V は Studio 2 Pro 2.1.2 で、音符検出感度は初期値、音高の半音単位への丸めと発音の自動認識を有効にし、言語を日本語に設定しました。推定音符は 6,325 個です。音符に付いた「-」は直前の発音の継続、音素表記は最初の母音までをその音符の発音として比較しました。伴奏を含む音源からボーカルを取り出す処理は Synthesizer V の変換機能には含まれないため、他方式と同じ分離済みボーカルを使いました。[Dreamtonics も単独のボーカル録音を入力として推奨しています](https://www.dreamtonics.com/voice-to-midi/)。
 
 Vocal2Midi は日本語モーラ認識に RomajiASR v1.0.0、整列に HubertFA v0.0.7、音符抽出に GAME 1.0.3 medium を使用しました。音符に付いた「-」は直前のモーラの継続として採点し、正解譜面の「ー」だけが付いた音符にも対応できるようにしています。
 
 VocalParse は公開の 1.7B モデルを音声のみのモードで実行しました。各曲を 30 秒以下の 87 区間に分け、区間ごとに最大 768 トークンを生成しました。音符列を解析できて正常終了した 41 区間を採用し、残り 46 区間は 10 秒以下の 135 区間に分けて再実行しました。再実行では 123 区間の音符列を解析でき、途中までの出力も採点しました。解析できない区間は推定音符 0 個として正解音符を分母に残しています。音符に付いた文字は日本語の読みへ変換してモーラを比較しました。開始・音高・モーラが一致した音符は 1 個で、表の F1 は小数第 1 位に丸めています。
+
+MuScriptor + soramimic-score では、[NeuralNote v2.1.0](https://github.com/DamRsn/NeuralNote/releases/tag/v2.1.0) の採譜エンジン [muscriptor.cpp](https://github.com/DamRsn/muscriptor.cpp/tree/c8adc019677ed3479fa3c22c1a117d662382f347) を直接使い、MuScriptor の `medium-f16` モデルを楽器指定 `Voice` で実行しました。同じ分離ボーカルを 16 kHz・モノラルに変換して入力し、9 曲すべてで歌詞との対応付けまで完了しました。推定音符は 6,319 個です。歌詞の自動認識結果・読み・発音時刻は表の soramimic-score と共通にし、MuScriptor の音符との対応付けを再計算しています。
+
+MuScriptor の出力は、同時に始まる音符のうち最長のものを残し、長さも同じなら音高の高いものを選びました。音符が重なる場合は、先行音符の終了を次の音符の開始まで短縮し、単旋律として歌詞を対応付けています。この比較は `medium-f16`・`Voice` 指定の条件で、`large` モデルと `Automatic` 指定は評価していません。
 
 STARS と VocalParse の公開モデルは日本語を学習対象としていないため、この比較は各方式の一般的な優劣を示すものではありません。
 
