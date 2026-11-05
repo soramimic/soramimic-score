@@ -19,7 +19,7 @@ from bisect import bisect_left
 from dataclasses import asdict, dataclass, replace
 from functools import lru_cache
 import math
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 from .ir import (MINIMUM_USABLE_TIMING_CONFIDENCE, IntermediateRepresentation,
                  NoteCandidate, SingingUnit)
@@ -182,6 +182,10 @@ class _Path:
     cost: NoteRunCost
     steps: tuple[_Step, ...]
     tie_key: tuple[object, ...]
+
+
+class _NoFeasiblePath(RuntimeError):
+    """A candidate partition cannot satisfy its note-coverage constraints."""
 
 
 def _ctc_onsets(
@@ -439,12 +443,18 @@ def _search_phrase(
     line_windows_by_utterance: Mapping[str, tuple[float, float]] | None = None,
     required_note_ids: frozenset[str] = frozenset(),
     *, complete_path: _Path | None = None,
+    check_cancelled: Callable[[], None] | None = None,
 ) -> _Path:
+    if check_cancelled is not None:
+        check_cancelled()
     ceiling = complete_path.cost.total if complete_path is not None else math.inf
+    work_since_check = 0
     states: dict[tuple[int, int, int | None, str | None], _Path] = {
         (0, 0, None, None): _Path(NoteRunCost(), (), ())
     }
     for unit_index in range(len(units)):
+        if check_cancelled is not None:
+            check_cancelled()
         # Predecessor paths repeatedly consider the same lyric/note interval.
         # Cache only its scalar cost, scoped to one lyric position and bounded
         # independently of the phrase length. Materialize notes only for a path
@@ -463,9 +473,16 @@ def _search_phrase(
                 config=config, line_windows_by_utterance=line_windows_by_utterance,
             )
 
-        current = [(state, path) for state, path in states.items()
-                   if state[0] == unit_index and path.cost.total <= ceiling]
+        # Every transition consumes at least one unit. Once a layer is visited,
+        # no later transition can read or replace it. Keep only future layers;
+        # paths already carry their steps and deterministic tie keys.
+        current = [(state, states.pop(state)) for state in tuple(states)
+                   if state[0] == unit_index]
         for (unused_unit, cursor, previous_index, previous_segment), path in current:
+            if check_cancelled is not None:
+                check_cancelled()
+            if path.cost.total > ceiling:
+                continue
             unit = units[unused_unit]
             supported_phase = (unit.ctc_onset_sec is not None and any(
                 note.start_sec - .12 <= unit.ctc_onset_sec <= note.end_sec + .12 for note in notes))
@@ -510,6 +527,11 @@ def _search_phrase(
                         notes[start_note], previous_note, segment, previous_segment, config,
                     )
                     for end_note in range(start_note + 1, len(notes) + 1):
+                        if check_cancelled is not None:
+                            work_since_check += 1
+                            if work_since_check >= 256:
+                                check_cancelled()
+                                work_since_check = 0
                         cost = assignment_cost(end_unit, start_note, end_note, split)
                         if segment_rest or math.copysign(1.0, segment_rest) < 0:
                             cost = replace(cost, segment_rest=segment_rest)
@@ -554,6 +576,8 @@ def _search_phrase(
                         states[state] = _Path(candidate_cost, path.steps + (step,), tie_key)
     finalists = []
     for (unit_index, cursor, _previous, _segment), path in states.items():
+        if check_cancelled is not None:
+            check_cancelled()
         if unit_index != len(units):
             continue
         if any(note.id in required_note_ids for note in notes[cursor:]):
@@ -565,7 +589,7 @@ def _search_phrase(
             "terminal", () if trailing is None else trailing.source_note_ids,
         )))
     if not finalists:
-        raise RuntimeError("note-run optimizer did not reach a terminal state")
+        raise _NoFeasiblePath("note-run optimizer did not reach a terminal state")
     return min(finalists, key=lambda path: (path.cost.total, path.tie_key))
 
 
@@ -573,6 +597,7 @@ def _join_partition_paths(
     paths: Sequence[_Path], units: Sequence[_Unit], notes: Sequence[NoteCandidate],
     config: NoteRunConfig,
     line_windows_by_utterance: Mapping[str, tuple[float, float]] | None,
+    check_cancelled: Callable[[], None] | None = None,
 ) -> _Path:
     """Replay local decisions as one feasible path, charging every join once."""
     note_indices = {note.id: index for index, note in enumerate(notes)}
@@ -582,6 +607,8 @@ def _join_partition_paths(
     previous_index = previous_segment = None
     for path in paths:
         for step in path.steps:
+            if check_cancelled is not None:
+                check_cancelled()
             if step.omitted_mora_ids:
                 result = _extend(result, step, ("omit-mora", units[unit_index].source.id))
                 unit_index += 1
@@ -627,6 +654,7 @@ def _partitioned_candidate(
     units: Sequence[_Unit], notes: Sequence[NoteCandidate], config: NoteRunConfig,
     line_windows_by_utterance: Mapping[str, tuple[float, float]] | None,
     required_note_ids: frozenset[str],
+    check_cancelled: Callable[[], None] | None = None,
 ) -> _Path | None:
     """Find a cheap upper bound, without making these cuts final boundaries."""
     if len(units) < 24 or len(notes) < 24:
@@ -634,6 +662,8 @@ def _partitioned_candidate(
     cuts = [(0, 0)]
     starts = [note.start_sec for note in notes]
     for index in range(1, len(units)):
+        if check_cancelled is not None:
+            check_cancelled()
         left, right = units[index - 1:index + 1]
         if (index - cuts[-1][0] < 12 or len(units) - index < 6
                 or left.base_syllable == right.base_syllable
@@ -660,8 +690,9 @@ def _partitioned_candidate(
                 units[first_unit:last_unit], local_notes, config,
                 line_windows_by_utterance,
                 required_note_ids.intersection(note.id for note in local_notes),
+                check_cancelled=check_cancelled,
             ))
-    except RuntimeError:
+    except _NoFeasiblePath:
         # A required repeated-vocalization note may need a crossing assignment.
         # The unrestricted search must still be allowed to find that path.
         return None
@@ -676,20 +707,26 @@ def _partitioned_candidate(
         # A phase can lack note support locally while a note across the cut
         # makes it mandatory in the full phrase. Such a seed is not feasible.
         return None
-    return _join_partition_paths(paths, units, notes, config, line_windows_by_utterance)
+    return _join_partition_paths(paths, units, notes, config, line_windows_by_utterance,
+                                 check_cancelled=check_cancelled)
 
 
 def _optimize_phrase(
     units: Sequence[_Unit], notes: Sequence[NoteCandidate], config: NoteRunConfig,
     line_windows_by_utterance: Mapping[str, tuple[float, float]] | None = None,
     required_note_ids: frozenset[str] = frozenset(),
+    *, check_cancelled: Callable[[], None] | None = None,
 ) -> _Path:
+    if check_cancelled is not None:
+        check_cancelled()
     candidate = _partitioned_candidate(
         units, notes, config, line_windows_by_utterance, required_note_ids,
+        check_cancelled=check_cancelled,
     )
     return _search_phrase(
         units, notes, config, line_windows_by_utterance, required_note_ids,
         complete_path=candidate,
+        check_cancelled=check_cancelled,
     )
 
 
@@ -759,6 +796,7 @@ def optimize_note_runs(
     segment_ids_by_mora: Mapping[str, str] | None = None,
     line_windows_by_utterance: Mapping[str, tuple[float, float]] | None = None,
     utterance_groups: Sequence[Sequence[str]] | None = None,
+    check_cancelled: Callable[[], None] | None = None,
 ) -> NoteRunResult:
     """Allocate lyric syllables while retaining source-note pitch boundaries.
 
@@ -768,7 +806,11 @@ def optimize_note_runs(
     optionally adjusted to nearby melody rests. ``utterance_groups`` may retain
     shared acoustic windows across authored lines. It must partition all
     utterances in order; assignments still preserve each line's syllables.
+    ``check_cancelled``, when supplied, is called periodically during search.
+    It may raise a caller-defined exception, which propagates unchanged.
     """
+    if check_cancelled is not None:
+        check_cancelled()
     if not isinstance(document, IntermediateRepresentation):
         raise TypeError("document must be an IntermediateRepresentation")
     if document.links:
@@ -860,12 +902,15 @@ def optimize_note_runs(
         required_note_ids=required_notes_by_utterance.get(
             utterance_id, frozenset(),
         ),
+        check_cancelled=check_cancelled,
     ) for utterance_id, units in phrases)
     if groups:
         by_id = dict(phrases)
         paths_by_id = dict(zip((identifier for identifier, _ in phrases), paths, strict=True))
         selected_paths = []
         for group in groups:
+            if check_cancelled is not None:
+                check_cancelled()
             originals = tuple(paths_by_id[identifier] for identifier in group)
             omitted = {mid for path in originals for step in path.steps
                        for mid in step.omitted_mora_ids}
@@ -892,6 +937,7 @@ def optimize_note_runs(
                 settings, line_windows_by_utterance=line_windows_by_utterance,
                 required_note_ids=frozenset(note_id for identifier in group
                                            for note_id in required_notes_by_utterance.get(identifier, ())),
+                check_cancelled=check_cancelled,
             )
             joint_omitted = {mid for step in joint.steps for mid in step.omitted_mora_ids}
             def assigned_notes(paths):

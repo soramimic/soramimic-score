@@ -1,6 +1,7 @@
 from dataclasses import asdict, replace
 import math
 import unittest
+import weakref
 from unittest.mock import patch
 
 from soramimic_score.alignment import ObservedSingingUnit, build_known_lyrics_document
@@ -91,6 +92,101 @@ def preserving_config(**changes):
 
 
 class NoteRunOptimizationTests(unittest.TestCase):
+    def test_cancellation_interrupts_a_single_lyric_position(self):
+        source = document("カ", (.05,), tuple(
+            note(f"n{i}", i * .1, i * .1 + .09) for i in range(600)
+        ))
+        requested = False
+        original = note_runs._assignment_cost
+
+        def evaluate(*args, **kwargs):
+            nonlocal requested
+            requested = True
+            return original(*args, **kwargs)
+
+        stopped = RuntimeError("cancel requested")
+
+        def check():
+            if requested:
+                raise stopped
+
+        with patch.object(note_runs, "_assignment_cost", side_effect=evaluate) as calls:
+            with self.assertRaises(RuntimeError) as caught:
+                optimize_note_runs(source, check_cancelled=check)
+        self.assertIs(caught.exception, stopped)
+        self.assertGreater(calls.call_count, 0)
+        self.assertLessEqual(calls.call_count, 256)
+
+    def test_partition_search_does_not_swallow_cancellation(self):
+        source = document("カ" * 24, tuple(i + .05 for i in range(24)), tuple(
+            note(f"n{i}", i, i + .98) for i in range(24)
+        ))
+        requested = False
+        original = note_runs._assignment_cost
+
+        def evaluate(*args, **kwargs):
+            nonlocal requested
+            requested = True
+            return original(*args, **kwargs)
+
+        stopped = RuntimeError("cancel partition")
+
+        def check():
+            if requested:
+                raise stopped
+
+        with patch.object(note_runs, "_assignment_cost", side_effect=evaluate), \
+                patch.object(note_runs, "_search_phrase", wraps=note_runs._search_phrase) as search:
+            with self.assertRaises(RuntimeError) as caught:
+                optimize_note_runs(source, check_cancelled=check)
+        self.assertIs(caught.exception, stopped)
+        self.assertEqual(search.call_count, 1)
+
+    def test_shared_window_repair_checks_cancellation(self):
+        source = multiline_document(("カ", "キク"), (.1, .4, .7), (note("n", 0, 1),))
+        original = note_runs._search_phrase
+        in_repair = False
+        stopped = RuntimeError("cancel repair")
+
+        def search(units, *args, **kwargs):
+            nonlocal in_repair
+            in_repair = len(units) == 3
+            return original(units, *args, **kwargs)
+
+        def check():
+            if in_repair:
+                raise stopped
+
+        with patch.object(note_runs, "_search_phrase", side_effect=search):
+            with self.assertRaises(RuntimeError) as caught:
+                optimize_note_runs(source, preserving_config(),
+                                  utterance_groups=(("u0", "u1"),), check_cancelled=check)
+        self.assertIs(caught.exception, stopped)
+
+    def test_consumed_search_layers_do_not_retain_path_objects(self):
+        count = 8
+        source = document("カ" * 48, tuple(i * .02 for i in range(48)), tuple(
+            note(f"n{i}", i * .2, i * .2 + .18) for i in range(count)
+        ))
+        original = note_runs._Path
+        live = {}
+        peak = 0
+
+        def track(*args, **kwargs):
+            nonlocal peak
+            path = original(*args, **kwargs)
+            key = id(path)
+            live[key] = weakref.ref(path, lambda _ref: live.pop(key))
+            peak = max(peak, len(live))
+            return path
+
+        expected = optimize_note_runs(source)
+        with patch.object(note_runs, "_Path", side_effect=track):
+            actual = optimize_note_runs(source, check_cancelled=lambda: None)
+        self.assertEqual(actual, expected)
+        self.assertFalse(live)
+        self.assertLessEqual(peak, 4 * (count + 1))
+
     def test_shared_acoustic_window_can_split_one_note_across_authored_lines(self):
         source = multiline_document(("カ", "キク"), (.1, .4, .7), (
             note("shared", 0, 1),

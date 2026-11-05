@@ -1,6 +1,7 @@
 import tempfile
 import importlib.util
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from soramimic_score import (
@@ -22,6 +23,30 @@ from soramimic_score.vocal_activity import VocalActivity
 
 
 class AudioPipelineTests(unittest.TestCase):
+    def test_cancellation_reaches_score_search_from_audio_analysis(self):
+        from soramimic_score import note_runs
+
+        requested = False
+        original = note_runs._assignment_cost
+
+        def evaluate(*args, **kwargs):
+            nonlocal requested
+            requested = True
+            return original(*args, **kwargs)
+
+        stopped = RuntimeError("cancel analysis")
+
+        def check():
+            if requested:
+                raise stopped
+
+        adapters = AudioAdapters(self._readings, self._moras, self._melody,
+                                 lambda _: (LyricLine("空", 0, .4), LyricLine("耳", .4, .8)))
+        with patch.object(note_runs, "_assignment_cost", side_effect=evaluate):
+            with self.assertRaises(RuntimeError) as caught:
+                analyze_audio(self.audio, adapters, check_cancelled=check)
+        self.assertIs(caught.exception, stopped)
+
     def test_automatic_ctc_capacity_drops_only_the_unalignable_line(self):
         def readings(_path, lines):
             return tuple(ReadingSelection(line.text, "test", 1) for line in lines)
