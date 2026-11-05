@@ -558,6 +558,7 @@ def run_stage3_document(
         str, Sequence[VocalizationReattack]
     ] | None = None,
     check_cancelled: Callable[[], None] | None = None,
+    search_timeout: float | None = None,
 ) -> Stage3Run:
     """Run the production CTC-guided, note-preserving Stage 3 decoder.
 
@@ -616,6 +617,7 @@ def run_stage3_document(
         line_windows_by_utterance=line_windows_by_utterance,
         utterance_groups=utterance_groups,
         check_cancelled=check_cancelled,
+        search_timeout=search_timeout,
     )
     linked, correspondences = _materialize_note_run(document, note_run, settings)
     realization = compile_realization(linked)

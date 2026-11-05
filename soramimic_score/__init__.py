@@ -69,6 +69,7 @@ from .note_runs import (
     NoteRunCost,
     NoteRunResult,
     PreservedNote,
+    SearchTimeoutError,
     optimize_note_runs,
 )
 from .vocalization import (
@@ -112,6 +113,7 @@ __all__ = [
     "NoteRunConfig",
     "NoteRunCost",
     "NoteRunResult",
+    "SearchTimeoutError",
     "ObservedSingingUnit",
     "Phoneme",
     "PreservedNote",

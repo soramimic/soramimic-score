@@ -7,7 +7,7 @@ from unittest.mock import patch
 from soramimic_score.alignment import ObservedSingingUnit, build_known_lyrics_document
 from soramimic_score.ir import Boundary, Evidence, NoteCandidate
 from soramimic_score.japanese import LyricSpan, ReadingCandidate
-from soramimic_score.note_runs import NoteRunConfig, optimize_note_runs
+from soramimic_score.note_runs import NoteRunConfig, SearchTimeoutError, optimize_note_runs
 from soramimic_score import note_runs
 
 
@@ -92,6 +92,85 @@ def preserving_config(**changes):
 
 
 class NoteRunOptimizationTests(unittest.TestCase):
+    def test_search_timeout_is_optional_and_validated(self):
+        source = document("カ", (.05,), (note("n", 0, .2),))
+        expected = optimize_note_runs(source)
+        with patch.object(note_runs.time, "monotonic", side_effect=AssertionError("no deadline")):
+            self.assertEqual(optimize_note_runs(source), expected)
+        for timeout in (0, -1, math.inf, math.nan, True):
+            with self.subTest(timeout=timeout), self.assertRaises(ValueError):
+                optimize_note_runs(source, search_timeout=timeout)
+
+    def test_timeout_interrupts_long_search_without_partial_result(self):
+        source = document("カ", (.05,), tuple(
+            note(f"n{i}", i * .1, i * .1 + .09) for i in range(600)
+        ))
+        clock = 0.
+        original = note_runs._assignment_cost
+
+        def evaluate(*args, **kwargs):
+            nonlocal clock
+            clock = 121.
+            return original(*args, **kwargs)
+
+        with patch.object(note_runs.time, "monotonic", side_effect=lambda: clock), \
+                patch.object(note_runs, "_assignment_cost", side_effect=evaluate) as calls:
+            with self.assertRaises(SearchTimeoutError) as caught:
+                optimize_note_runs(source, search_timeout=120.)
+        self.assertEqual(caught.exception.timeout_seconds, 120.)
+        self.assertEqual(caught.exception.elapsed_seconds, 121.)
+        self.assertGreater(calls.call_count, 0)
+        self.assertLessEqual(calls.call_count, 256)
+
+    def test_deadline_covers_all_phrases_without_resetting(self):
+        source = multiline_document(("カ", "キ"), (.1, 1.1), (
+            note("n0", 0, .5), note("n1", 1, 1.5),
+        ))
+        clock = 0.
+        original = note_runs._assignment_cost
+
+        def evaluate(*args, **kwargs):
+            nonlocal clock
+            clock += .7
+            return original(*args, **kwargs)
+
+        with patch.object(note_runs.time, "monotonic", side_effect=lambda: clock), \
+                patch.object(note_runs, "_assignment_cost", side_effect=evaluate):
+            with self.assertRaises(SearchTimeoutError):
+                optimize_note_runs(source, search_timeout=1.)
+        self.assertAlmostEqual(clock, 1.4)
+
+    def test_candidate_search_uses_the_same_deadline(self):
+        source = document("カ" * 24, tuple(i + .05 for i in range(24)), tuple(
+            note(f"n{i}", i, i + .98) for i in range(24)
+        ))
+        clock = 0.
+        original = note_runs._assignment_cost
+
+        def evaluate(*args, **kwargs):
+            nonlocal clock
+            clock = 2.
+            return original(*args, **kwargs)
+
+        with patch.object(note_runs.time, "monotonic", side_effect=lambda: clock), \
+                patch.object(note_runs, "_assignment_cost", side_effect=evaluate), \
+                patch.object(note_runs, "_search_phrase", wraps=note_runs._search_phrase) as search:
+            with self.assertRaises(SearchTimeoutError):
+                optimize_note_runs(source, search_timeout=1.)
+        self.assertEqual(search.call_count, 1)
+
+    def test_cancellation_takes_precedence_over_expired_deadline(self):
+        source = document("カ", (.05,), (note("n", 0, .2),))
+        canceled = RuntimeError("explicit cancellation")
+
+        def check():
+            raise canceled
+
+        with patch.object(note_runs.time, "monotonic", side_effect=(0., 10.)):
+            with self.assertRaises(RuntimeError) as caught:
+                optimize_note_runs(source, search_timeout=1., check_cancelled=check)
+        self.assertIs(caught.exception, canceled)
+
     def test_cancellation_interrupts_a_single_lyric_position(self):
         source = document("カ", (.05,), tuple(
             note(f"n{i}", i * .1, i * .1 + .09) for i in range(600)

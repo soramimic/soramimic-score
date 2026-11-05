@@ -19,6 +19,7 @@ from bisect import bisect_left
 from dataclasses import asdict, dataclass, replace
 from functools import lru_cache
 import math
+import time
 from typing import Callable, Mapping, Sequence
 
 from .ir import (MINIMUM_USABLE_TIMING_CONFIDENCE, IntermediateRepresentation,
@@ -194,6 +195,41 @@ class _Path:
 
 class _NoFeasiblePath(RuntimeError):
     """A candidate partition cannot satisfy its note-coverage constraints."""
+
+
+class SearchTimeoutError(TimeoutError):
+    """An optional caller-supplied deadline expired during note allocation."""
+
+    def __init__(self, timeout_seconds: float, elapsed_seconds: float):
+        super().__init__("lyric-note search exceeded its time limit")
+        self.timeout_seconds = timeout_seconds
+        self.elapsed_seconds = elapsed_seconds
+
+
+def _validate_search_timeout(seconds: float | None) -> None:
+    if seconds is not None and (
+        isinstance(seconds, bool) or not math.isfinite(seconds) or seconds <= 0
+    ):
+        raise ValueError("search_timeout must be positive and finite, or None")
+
+
+def _with_search_timeout(
+    seconds: float | None, check_cancelled: Callable[[], None] | None,
+) -> Callable[[], None] | None:
+    _validate_search_timeout(seconds)
+    if seconds is None:
+        return check_cancelled
+    started = time.monotonic()
+
+    def check() -> None:
+        # An explicit cancellation takes precedence over deadline expiry.
+        if check_cancelled is not None:
+            check_cancelled()
+        elapsed = time.monotonic() - started
+        if elapsed >= seconds:
+            raise SearchTimeoutError(seconds, elapsed)
+
+    return check
 
 
 def _ctc_onsets(
@@ -809,6 +845,7 @@ def optimize_note_runs(
     line_windows_by_utterance: Mapping[str, tuple[float, float]] | None = None,
     utterance_groups: Sequence[Sequence[str]] | None = None,
     check_cancelled: Callable[[], None] | None = None,
+    search_timeout: float | None = None,
 ) -> NoteRunResult:
     """Allocate lyric syllables while retaining source-note pitch boundaries.
 
@@ -820,7 +857,11 @@ def optimize_note_runs(
     utterances in order; assignments still preserve each line's syllables.
     ``check_cancelled``, when supplied, is called periodically during search.
     It may raise a caller-defined exception, which propagates unchanged.
+    ``search_timeout`` optionally limits this call, including candidate and
+    shared-window searches. It defaults to no deadline. Expiry raises
+    :class:`SearchTimeoutError`; no partial allocation is returned.
     """
+    check_cancelled = _with_search_timeout(search_timeout, check_cancelled)
     if check_cancelled is not None:
         check_cancelled()
     if not isinstance(document, IntermediateRepresentation):
