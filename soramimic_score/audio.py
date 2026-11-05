@@ -417,6 +417,7 @@ def analyze_audio(
     on_progress: Callable[[str], None] | None = None,
     accompaniment_path: Path | None = None,
     check_cancelled: Callable[[], None] | None = None,
+    search_timeout: float | None = None,
 ) -> ScoreDocument:
     """Keep supplied lyrics, locate them acoustically, then align their reading.
 
@@ -427,9 +428,14 @@ def analyze_audio(
     removed; original text and removal evidence remain in the audit.
     ``check_cancelled`` is forwarded to score decoding for cooperative
     cancellation during long searches; callback exceptions propagate unchanged.
+    ``search_timeout`` limits each score-decoding call, excluding model
+    inference. The default is unlimited; expiry raises SearchTimeoutError.
     """
     from .japanese import strip_ruby
     from .surface import attach_lyric_surface
+    from .note_runs import _validate_search_timeout
+
+    _validate_search_timeout(search_timeout)
 
     path = Path(audio_path)
     if not path.is_file():
@@ -463,7 +469,8 @@ def analyze_audio(
                 return analyze_audio(prepared_path, prepared,
                                      lyrics=supplied_input if supplied_input is not None else lyrics,
                                      adjust_lyrics=adjust_lyrics, on_progress=on_progress,
-                                     check_cancelled=check_cancelled)
+                                     check_cancelled=check_cancelled,
+                                     search_timeout=search_timeout)
 
     reading_selector = (adapters.automatic_reading_selector
                         if lyrics is None and adapters.automatic_reading_selector is not None
@@ -1038,6 +1045,7 @@ def analyze_audio(
                 for index, line in enumerate(lines)
             } if lines else None,
             check_cancelled=check_cancelled,
+            search_timeout=search_timeout,
         )
         windows = unowned_note_windows(provisional.observations, lines)
         if windows and adapters.vocal_activity is not None:
@@ -1426,6 +1434,7 @@ def analyze_audio(
         utterance_groups=utterance_groups,
         vocalization_reattacks_by_utterance=reattacks if reattacks else None,
         check_cancelled=check_cancelled,
+        search_timeout=search_timeout,
     )
     if allow_spoken:
         from .spoken import add_spoken_fallback
