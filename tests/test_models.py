@@ -10,16 +10,43 @@ import wave
 from unittest.mock import patch
 import requests
 
-from soramimic_score import ModelConfig, LyricLine, analyze_audio, load
+from soramimic_score import ModelConfig, LyricLine, ReadingSelection, analyze_audio, load
 from soramimic_score.audio import CTCWindowCapacityError
 from soramimic_score.__main__ import analyze_main
-from soramimic_score.models import (_ctc_token_id, _transcribe_shared_kana, create_adapters,
+from soramimic_score.models import (_align_ctc_spans, _ctc_token_id, _transcribe_shared_kana, create_adapters,
                                     dictionary_readings, read_melody_lab)
 from soramimic_score.shared_inference import SharedInference
 from tests import test_audio_pipeline as fixtures
 
 
 class ModelTests(unittest.TestCase):
+    def test_location_candidates_reuse_default_dictionary_lookup_without_audio(self):
+        adapters = create_adapters(self.config)
+        selection = ReadingSelection('ゴヒャクロクジューナナ', 'dictionary', .9,
+                                     ('ゴヒャクロクジューナナ', 'ゴーロクナナ'))
+        with patch('soramimic_score.models.dictionary_readings', return_value=(selection,)) as lookup:
+            self.assertEqual(adapters.lyric_reading('567'), selection.kana)
+            self.assertEqual(adapters.lyric_reading_candidates('567'), selection.candidates)
+            self.assertEqual(adapters.lyric_reading_candidates('567'), selection.candidates)
+            lookup.assert_called_once_with(None, (LyricLine('567'),))
+
+    @unittest.skipUnless(importlib.util.find_spec("torch") and importlib.util.find_spec("torchaudio"),
+                         "audio dependencies not installed")
+    def test_supplied_ctc_skips_untranscribed_audio_without_exporting_wildcards(self):
+        import torch
+        logits = torch.full((30, 4), -12.0)
+        logits[:, 0] = 0
+        logits[1:10, 3] = 12
+        logits[12, 1] = 12
+        logits[18, 2] = 12
+        logits[22:29, 3] = 12
+        emission = torch.log_softmax(logits, dim=-1)
+        spans = _align_ctc_spans(emission, [1, 2], 0, free_edges=True)
+        self.assertEqual([s.token for s in spans], [1, 2])
+        self.assertEqual([s.start for s in spans], [12, 18])
+        self.assertEqual([s.end for s in spans], [13, 19])
+        self.assertTrue(all(s.score > .99 for s in spans))
+
     def test_ctc_aliases_require_an_available_sound_and_prefer_exact_tokens(self):
         vocab = {"ワ": 1, "カ": 2, "ヮ": 3}
         self.assertEqual(_ctc_token_id("ヮ", vocab), 3)
