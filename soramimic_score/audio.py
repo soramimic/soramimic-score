@@ -105,7 +105,10 @@ class AudioAdapters:
 
     ``lyric_recognizer`` is required by the ASR-first audio pipeline.
     ``lyric_reading`` optionally supplies linguistic readings for whole-line
-    comparison (otherwise normalized surface text is used). ``lyric_recoverer``
+    comparison (otherwise normalized surface text is used). The optional
+    ``lyric_reading_candidates`` supplies closed pronunciation alternatives for
+    locating unmatched supplied lyrics without additional recognition.
+    ``lyric_recoverer``
     can retry one singing window when Whisper emits a credit template. The
     optional ``template_lyric_recoverer`` retries template spans without a fixed
     recognition language. The reading, mora, and melody adapters are required
@@ -133,6 +136,8 @@ class AudioAdapters:
         [Path, Sequence[LyricLine], Sequence[str | None]], Sequence[ReadingSelection]
     ] | None = None
     template_lyric_recoverer: LyricRecoverer | None = None
+    supplied_mora_aligner: MoraAligner | None = None
+    lyric_reading_candidates: Callable[[str], Sequence[str]] | None = None
 
 
 class AudioPipelineError(RuntimeError):
@@ -1357,6 +1362,9 @@ def analyze_audio(
     if overlay is not None:
         lines, readings, moras, unobserved_lines = restore_authored_lines(
             lines, readings, moras, overlay, unobserved_lines)
+        from .supplied_alignment import verify_supplied_alignment
+        lines, readings, moras, unobserved_lines = verify_supplied_alignment(
+            path, lines, readings, moras, overlay, unobserved_lines, adapters)
     if on_progress:
         on_progress("楽譜データを組み立てています")
     observations = build_audio_observations(lines, readings, moras, notes,
@@ -1373,6 +1381,12 @@ def analyze_audio(
         observations = replace(observations, evidence=observations.evidence + (Evidence(
             "audio-supplied-input", "soramimic_score.lyric_input", "lyric-input", 1.,
             {"stage": "supplied", **input_detail},
+        ), Evidence(
+            "audio-lyric-timing-policy", "soramimic_score.audio", "lyric-timing-policy", 1.,
+            {"ctc_priority_utterance_ids": [f"u{i}" for i, group in enumerate(overlay["groups"])
+                                             if group["supplied_indices"]
+                                             and group["operation"] == "retain_supplied"
+                                             and group.get("ctc_verified")]},
         ),))
     if adjust_lyrics and overlay is not None:
         observations = replace(observations, evidence=observations.evidence + (Evidence(
@@ -1429,7 +1443,8 @@ def analyze_audio(
         utterance_groups = tuple(tuple(ids) for ids in acoustic_owners.values())
     result = compile_score(
         observations,
-        config=NoteRunConfig(whisper_boundary_cost_per_sec2=.1),
+        config=NoteRunConfig(whisper_boundary_cost_per_sec2=.1,
+                             ctc_timing_priority=lyrics is not None),
         line_windows_by_utterance=line_windows,
         utterance_groups=utterance_groups,
         vocalization_reattacks_by_utterance=reattacks if reattacks else None,
@@ -1442,6 +1457,9 @@ def analyze_audio(
             result, {f"u{i}": (line.start_sec, line.end_sec) for i, line in enumerate(lines)
                      if line.start_sec is not None and line.end_sec is not None},
             lambda windows: _run_adapter("vocal activity", adapters.vocal_activity, path, windows),
-            fill_unpitched_lines=True,
+            fill_unpitched_lines=lyrics is None,
+            eligible_utterance_ids=(frozenset(
+                f"u{i}" for i, group in enumerate(overlay["groups"])
+                if group.get("ctc_verified")) if overlay is not None else None),
         )
     return attach_lyric_surface(result, overlay) if overlay is not None else result

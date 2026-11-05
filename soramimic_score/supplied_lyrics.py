@@ -114,7 +114,10 @@ def _locate_groups(plan, recognized, duration):
     """Locate raw groups before resolving touching recognition boundaries."""
     groups = [dict(group) for group in plan["groups"]]
     for index, group in enumerate(groups):
-        if group["operation"] in {"match", "add", "repeat"}:
+        if "phonetic_location" in group:
+            start, end = group["phonetic_location"]["window_sec"]
+            group.update(start_sec=start, end_sec=end)
+        elif group["operation"] in {"match", "add", "repeat"}:
             sources = [recognized[i] for i in group["asr_indices"]]
             group.update(start_sec=sources[0].start_sec, end_sec=sources[-1].end_sec)
         else:
@@ -171,11 +174,16 @@ def prepare_supplied_audio(path, supplied, recognized, notes, adapters, *, adjus
         raise AudioPipelineError("lyrics", "recording duration must be finite and nonnegative")
     plan = plan_supplied_lyrics(supplied, recognized, reading=adapters.lyric_reading,
                                 add_missing=adjust_lyrics)
+    from .supplied_location import propose_phonetic_locations
+    context_edges = propose_phonetic_locations(
+        plan, recognized, reading=adapters.lyric_reading,
+        candidates=adapters.lyric_reading_candidates,
+    )
     located = _locate_groups(plan, recognized, duration)
     # A zero-duration gap does not identify which neighbor contains the omitted
     # phrase. Retain both anchors for a later, joint CTC target, after readings
     # and support decisions have been fixed using the original windows.
-    plan["ctc_context_edges"] = [
+    plan["ctc_context_edges"] = context_edges + [
         [index, neighbor]
         for index, group in enumerate(located)
         if not _has_duration(group["start_sec"], group["end_sec"])
