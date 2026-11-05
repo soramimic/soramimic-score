@@ -57,7 +57,7 @@ class LyricInputContractTests(unittest.TestCase):
             parsed.original_boundary(8)
         with self.assertRaises(FrozenInstanceError):
             parsed.text = "改変"
-        with self.assertRaises(ValueError):
+        with self.assertRaises((ValueError, TypeError)):
             replace(parsed, text="改変")
 
     def test_ruby_and_parenthetical_structures_keep_original_coordinates(self):

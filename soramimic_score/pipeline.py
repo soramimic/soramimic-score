@@ -11,7 +11,7 @@ from __future__ import annotations
 from bisect import bisect_right
 from dataclasses import dataclass, replace
 import math
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 from .correspondence import (
     CorrespondenceConfig,
@@ -557,6 +557,7 @@ def run_stage3_document(
     vocalization_reattacks_by_utterance: Mapping[
         str, Sequence[VocalizationReattack]
     ] | None = None,
+    check_cancelled: Callable[[], None] | None = None,
 ) -> Stage3Run:
     """Run the production CTC-guided, note-preserving Stage 3 decoder.
 
@@ -614,6 +615,7 @@ def run_stage3_document(
         pitched, settings, segment_ids_by_mora=segments,
         line_windows_by_utterance=line_windows_by_utterance,
         utterance_groups=utterance_groups,
+        check_cancelled=check_cancelled,
     )
     linked, correspondences = _materialize_note_run(document, note_run, settings)
     realization = compile_realization(linked)
